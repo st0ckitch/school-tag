@@ -1,0 +1,186 @@
+'use strict';
+
+// Guard-facing pages. These are what opens on the guard's phone when they tap
+// an NFC tag (or scan the fallback QR code). Text is Georgian first, English
+// below, since the guards are the main users.
+
+const express = require('express');
+const {
+  getCheckpoint,
+  getActiveWalkthrough,
+  startWalkthrough,
+  recordScan,
+  getScans,
+  getMissingCheckpoints,
+  finishWalkthrough,
+} = require('../db');
+const { closeIncomplete } = require('../scheduler');
+const { esc, page } = require('../html');
+
+const router = express.Router();
+
+function minutesLeft(walkthrough) {
+  return Math.max(0, Math.round((new Date(walkthrough.deadline).getTime() - Date.now()) / 60000));
+}
+
+function progressView(walkthrough, justScanned) {
+  const scans = getScans(walkthrough.id);
+  const missing = getMissingCheckpoints(walkthrough.id);
+  const total = scans.length + missing.length;
+  const pct = total === 0 ? 100 : Math.round((scans.length / total) * 100);
+  const left = minutesLeft(walkthrough);
+
+  const scannedBanner = justScanned
+    ? `<div class="card" style="border-color:#16a34a">
+         <div class="big ok">✓ ${esc(justScanned.name)}</div>
+         <div class="muted">${esc(justScanned.location || '')}</div>
+         <div>დაფიქსირდა / Checkpoint recorded</div>
+       </div>`
+    : '';
+
+  const missingList = missing.length
+    ? `<div class="card">
+         <h2>დარჩენილია / Remaining (${missing.length})</h2>
+         <ul class="plain">
+           ${missing
+             .map(
+               (c) =>
+                 `<li><span>${esc(c.name)}${c.location ? ` <span class="muted">— ${esc(c.location)}</span>` : ''}</span><span class="muted">…</span></li>`
+             )
+             .join('')}
+         </ul>
+       </div>`
+    : `<div class="card">
+         <div class="big ok">ყველა წერტილი შემოწმებულია!</div>
+         <div>All checkpoints scanned — walkthrough complete.</div>
+         <form method="post" action="/walkthrough/finish" style="margin-top:12px">
+           <button class="btn full" type="submit">დასრულება / Finish walkthrough</button>
+         </form>
+       </div>`;
+
+  const finishEarly = missing.length
+    ? `<form method="post" action="/walkthrough/finish" class="no-print"
+             onsubmit="return confirm('დარჩენილია ${missing.length} წერტილი. ნამდვილად დაასრულებთ? / ${missing.length} checkpoints remain. Really finish?')">
+         <button class="btn secondary full" type="submit">ადრე დასრულება / Finish early</button>
+       </form>`
+    : '';
+
+  return `
+    ${scannedBanner}
+    <div class="card">
+      <h1>შემოვლა მიმდინარეობს / Walkthrough in progress</h1>
+      <div class="sub">${walkthrough.guard_name ? `დამცველი / Guard: ${esc(walkthrough.guard_name)} · ` : ''}დარჩენილი დრო / Time left: ${left} წთ/min</div>
+      <div class="big">${scans.length} / ${total}</div>
+      <div class="progressbar"><div style="width:${pct}%"></div></div>
+    </div>
+    ${missingList}
+    ${finishEarly}
+  `;
+}
+
+// The URL written on each NFC tag: /t/<checkpoint id>
+router.get('/t/:id', (req, res) => {
+  const checkpoint = getCheckpoint(req.params.id);
+  if (!checkpoint || !checkpoint.active) {
+    res.status(404).send(
+      page(
+        'Unknown tag',
+        `<div class="card"><h1>უცნობი ტეგი / Unknown tag</h1>
+         <p>ეს ტეგი სისტემაში არ არის რეგისტრირებული. / This tag is not registered in the system.</p></div>`,
+        { lang: 'ka' }
+      )
+    );
+    return;
+  }
+
+  const active = getActiveWalkthrough();
+  if (active) {
+    recordScan(active.id, checkpoint.id);
+    res.send(page(`✓ ${checkpoint.name}`, progressView(active, checkpoint), { lang: 'ka' }));
+    return;
+  }
+
+  // No walkthrough running — offer to start one from this tag.
+  res.send(
+    page(
+      'Start walkthrough',
+      `<div class="card">
+         <h1>${esc(checkpoint.name)}</h1>
+         <div class="sub">${esc(checkpoint.location || '')}</div>
+         <p>შემოვლა არ არის დაწყებული. დაიწყეთ ახლა? / No walkthrough is running. Start one now?</p>
+         <form method="post" action="/walkthrough/start">
+           <input type="hidden" name="checkpoint_id" value="${esc(checkpoint.id)}">
+           <label for="guard_name">თქვენი სახელი / Your name</label>
+           <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
+           <button class="btn full" type="submit">შემოვლის დაწყება / Start walkthrough</button>
+         </form>
+       </div>`,
+      { lang: 'ka' }
+    )
+  );
+});
+
+router.post('/walkthrough/start', (req, res) => {
+  const walkthrough = startWalkthrough((req.body.guard_name || '').trim().slice(0, 80));
+  const checkpointId = req.body.checkpoint_id;
+  if (checkpointId && getCheckpoint(checkpointId)) {
+    recordScan(walkthrough.id, checkpointId);
+    res.redirect(`/t/${encodeURIComponent(checkpointId)}`);
+    return;
+  }
+  res.redirect('/walk');
+});
+
+// Live progress page (also linked from the dashboard).
+router.get('/walk', (req, res) => {
+  const active = getActiveWalkthrough();
+  if (!active) {
+    res.send(
+      page(
+        'No walkthrough',
+        `<div class="card">
+           <h1>შემოვლა არ მიმდინარეობს / No walkthrough running</h1>
+           <p>დაიწყეთ პირველი ტეგის დასკანერებით ან ღილაკით. / Start by scanning the first tag, or with the button below.</p>
+           <form method="post" action="/walkthrough/start">
+             <label for="guard_name">თქვენი სახელი / Your name</label>
+             <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
+             <button class="btn full" type="submit">შემოვლის დაწყება / Start walkthrough</button>
+           </form>
+         </div>`,
+        { lang: 'ka' }
+      )
+    );
+    return;
+  }
+  res.send(page('Walkthrough', progressView(active), { lang: 'ka', refreshSeconds: 15 }));
+});
+
+router.post('/walkthrough/finish', async (req, res) => {
+  const active = getActiveWalkthrough();
+  if (active) {
+    const missing = getMissingCheckpoints(active.id);
+    if (missing.length === 0) {
+      finishWalkthrough(active.id, 'completed');
+    } else {
+      await closeIncomplete(active, 'finished early by guard');
+    }
+  }
+  res.redirect('/walk/done');
+});
+
+router.get('/walk/done', (req, res) => {
+  res.send(
+    page(
+      'Done',
+      `<div class="card">
+         <div class="big ok">✓</div>
+         <h1>შემოვლა დასრულდა / Walkthrough finished</h1>
+         <p class="muted">შედეგი ჩაწერილია სისტემაში. / The result has been recorded.</p>
+         <a class="btn secondary full" href="/walk">უკან / Back</a>
+       </div>`,
+      { lang: 'ka' }
+    )
+  );
+});
+
+module.exports = router;
