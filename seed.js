@@ -24,13 +24,20 @@ const EXAMPLE_CHECKPOINTS = [
   ['Roof access door', 'Top floor'],
 ];
 
-if (listCheckpoints().length > 0) {
-  console.log('Checkpoints already exist — nothing seeded.');
-  process.exit(0);
+async function main() {
+  if ((await listCheckpoints()).length > 0) {
+    console.log('Checkpoints already exist — nothing seeded.');
+    process.exit(0);
+  }
+
+  for (const [name, location] of EXAMPLE_CHECKPOINTS) {
+    const cp = await addCheckpoint(name, location);
+    console.log(`Added ${cp.id}  ${name} (${location})`);
+  }
+  console.log(`\nSeeded ${EXAMPLE_CHECKPOINTS.length} checkpoints. Open /admin/tags to get the URLs to write to your NFC tags.`);
 }
 
-for (const [name, location] of EXAMPLE_CHECKPOINTS) {
-  const cp = addCheckpoint(name, location);
-  console.log(`Added ${cp.id}  ${name} (${location})`);
-}
-console.log(`\nSeeded ${EXAMPLE_CHECKPOINTS.length} checkpoints. Open /admin/tags to get the URLs to write to your NFC tags.`);
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

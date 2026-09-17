@@ -1,7 +1,6 @@
 'use strict';
 
 const {
-  db,
   getActiveWalkthrough,
   getMissingCheckpoints,
   finishWalkthrough,
@@ -13,8 +12,8 @@ const { sendNotification } = require('./notify');
 // alert. Shared by the scheduler (deadline passed) and the "finish early"
 // button on the guard page.
 async function closeIncomplete(walkthrough, reason) {
-  const missing = getMissingCheckpoints(walkthrough.id);
-  finishWalkthrough(walkthrough.id, 'incomplete');
+  const missing = await getMissingCheckpoints(walkthrough.id);
+  await finishWalkthrough(walkthrough.id, 'incomplete');
 
   const names = missing.map((c) => (c.location ? `${c.name} (${c.location})` : c.name));
   const message =
@@ -22,7 +21,7 @@ async function closeIncomplete(walkthrough, reason) {
     names.map((n) => `• ${n}`).join('\n') +
     (walkthrough.guard_name ? `\nGuard: ${walkthrough.guard_name}` : '');
 
-  addAlert(walkthrough.id, 'missed_checkpoints', message);
+  await addAlert(walkthrough.id, 'missed_checkpoints', message);
   await sendNotification('⚠️ School security: checkpoints missed', message);
   return missing;
 }
@@ -30,14 +29,14 @@ async function closeIncomplete(walkthrough, reason) {
 // Periodic check: any in-progress walkthrough past its deadline is closed as
 // incomplete and the alert goes out.
 async function tick() {
-  const active = getActiveWalkthrough();
+  const active = await getActiveWalkthrough();
   if (!active) return;
   if (new Date(active.deadline).getTime() > Date.now()) return;
 
-  const missing = getMissingCheckpoints(active.id);
+  const missing = await getMissingCheckpoints(active.id);
   if (missing.length === 0) {
     // Everything was scanned but nobody pressed finish — count it as done.
-    finishWalkthrough(active.id, 'completed');
+    await finishWalkthrough(active.id, 'completed');
     return;
   }
   await closeIncomplete(active, 'time expired');

@@ -27,9 +27,9 @@ before(async () => {
 after(() => server.close());
 
 test('full walkthrough flow', async () => {
-  const cp1 = db.addCheckpoint('Main entrance', 'Ground floor');
-  const cp2 = db.addCheckpoint('Gym', 'Ground floor');
-  const cp3 = db.addCheckpoint('Library', '1st floor');
+  const cp1 = await db.addCheckpoint('Main entrance', 'Ground floor');
+  const cp2 = await db.addCheckpoint('Gym', 'Ground floor');
+  const cp3 = await db.addCheckpoint('Library', '1st floor');
 
   // Unknown tag → 404
   const bad = await fetch(`${base}/t/doesnotexist`);
@@ -48,49 +48,67 @@ test('full walkthrough flow', async () => {
     redirect: 'follow',
   });
   assert.equal(res.status, 200);
-  const active = db.getActiveWalkthrough();
+  const active = await db.getActiveWalkthrough();
   assert.ok(active, 'walkthrough should be active');
   assert.equal(active.guard_name, 'TestGuard');
-  assert.equal(db.getScans(active.id).length, 1);
+  assert.equal((await db.getScans(active.id)).length, 1);
 
   // Scan the second tag; scanning it twice stays one scan
   await fetch(`${base}/t/${cp2.id}`);
   await fetch(`${base}/t/${cp2.id}`);
-  assert.equal(db.getScans(active.id).length, 2);
-  assert.equal(db.getMissingCheckpoints(active.id).length, 1);
-  assert.equal(db.getMissingCheckpoints(active.id)[0].id, cp3.id);
+  assert.equal((await db.getScans(active.id)).length, 2);
+  assert.equal((await db.getMissingCheckpoints(active.id)).length, 1);
+  assert.equal((await db.getMissingCheckpoints(active.id))[0].id, cp3.id);
 
   // Finish early with one checkpoint missing → incomplete + alert raised
   res = await fetch(`${base}/walkthrough/finish`, { method: 'POST', redirect: 'follow' });
   assert.equal(res.status, 200);
-  const finished = db.getWalkthrough(active.id);
+  const finished = await db.getWalkthrough(active.id);
   assert.equal(finished.status, 'incomplete');
-  const alerts = db.unacknowledgedAlerts();
+  const alerts = await db.unacknowledgedAlerts();
   assert.equal(alerts.length, 1);
   assert.match(alerts[0].message, /Library/);
 });
 
 test('deadline expiry raises alert via scheduler', async () => {
   // New walkthrough that expires immediately
-  const w = db.startWalkthrough('NightGuard');
-  db.db.prepare('UPDATE walkthroughs SET deadline = ? WHERE id = ?').run(
+  const w = await db.startWalkthrough('NightGuard');
+  await db.rawExecute('UPDATE walkthroughs SET deadline = ? WHERE id = ?', [
     new Date(Date.now() - 1000).toISOString(),
-    w.id
-  );
+    w.id,
+  ]);
   await tick();
-  const after = db.getWalkthrough(w.id);
+  const after = await db.getWalkthrough(w.id);
   assert.equal(after.status, 'incomplete');
-  const alert = db.unacknowledgedAlerts().find((a) => a.walkthrough_id === w.id);
+  const alert = (await db.unacknowledgedAlerts()).find((a) => a.walkthrough_id === w.id);
   assert.ok(alert, 'expiry alert should exist');
   assert.match(alert.message, /time expired/);
 });
 
+test('lazy check closes expired walkthrough on page load', async () => {
+  // New walkthrough whose deadline is forced into the past — no manual tick:
+  // simply loading the guard page must close it and raise the alert.
+  const w = await db.startWalkthrough('LateGuard');
+  await db.rawExecute('UPDATE walkthroughs SET deadline = ? WHERE id = ?', [
+    new Date(Date.now() - 1000).toISOString(),
+    w.id,
+  ]);
+
+  const res = await fetch(`${base}/walk`);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /No walkthrough running/);
+  assert.equal((await db.getWalkthrough(w.id)).status, 'incomplete');
+  const alert = (await db.unacknowledgedAlerts()).find((a) => a.walkthrough_id === w.id);
+  assert.ok(alert, 'lazy expiry alert should exist');
+  assert.match(alert.message, /time expired/);
+});
+
 test('completed walkthrough when all scanned', async () => {
-  const w = db.startWalkthrough('DayGuard');
-  for (const cp of db.listCheckpoints(true)) db.recordScan(w.id, cp.id);
+  const w = await db.startWalkthrough('DayGuard');
+  for (const cp of await db.listCheckpoints(true)) await db.recordScan(w.id, cp.id);
   const res = await fetch(`${base}/walkthrough/finish`, { method: 'POST', redirect: 'follow' });
   assert.equal(res.status, 200);
-  assert.equal(db.getWalkthrough(w.id).status, 'completed');
+  assert.equal((await db.getWalkthrough(w.id)).status, 'completed');
 });
 
 test('admin requires PIN, then works', async () => {

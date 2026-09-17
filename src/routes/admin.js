@@ -20,17 +20,21 @@ const {
   unacknowledgedAlerts,
   acknowledgeAlert,
 } = require('../db');
+const { tick } = require('../scheduler');
 const { esc, page } = require('../html');
 
 const router = express.Router();
 
+// Express 4 does not catch async handler rejections — route them to next().
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
 // --- tiny signed-cookie session ------------------------------------------
 
-function sign(value) {
-  return crypto.createHmac('sha256', getCookieSecret()).update(value).digest('hex');
+async function sign(value) {
+  return crypto.createHmac('sha256', await getCookieSecret()).update(value).digest('hex');
 }
 
-function hasSession(req) {
+async function hasSession(req) {
   const raw = (req.headers.cookie || '')
     .split(';')
     .map((c) => c.trim())
@@ -41,14 +45,14 @@ function hasSession(req) {
   if (idx < 0) return false;
   const token = value.slice(0, idx);
   const mac = value.slice(idx + 1);
-  const expected = sign(token);
+  const expected = await sign(token);
   return (
     mac.length === expected.length && crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))
   );
 }
 
-function requireAdmin(req, res, next) {
-  if (hasSession(req)) return next();
+async function requireAdmin(req, res, next) {
+  if (await hasSession(req)) return next();
   res.status(401).send(
     page(
       'Admin login',
@@ -64,16 +68,16 @@ function requireAdmin(req, res, next) {
   );
 }
 
-router.post('/admin/login', (req, res) => {
+router.post('/admin/login', wrap(async (req, res) => {
   const pin = String(req.body.pin || '');
-  const expected = String(getSetting('admin_pin'));
+  const expected = String(await getSetting('admin_pin'));
   const a = Buffer.from(pin.padEnd(64));
   const b = Buffer.from(expected.padEnd(64));
   if (pin.length === expected.length && crypto.timingSafeEqual(a, b)) {
     const token = `admin.${Date.now()}`;
     res.setHeader(
       'Set-Cookie',
-      `session=${encodeURIComponent(`${token}.${sign(token)}`)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}`
+      `session=${encodeURIComponent(`${token}.${await sign(token)}`)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}`
     );
     res.redirect('/admin');
     return;
@@ -92,7 +96,7 @@ router.post('/admin/login', (req, res) => {
        </div>`
     )
   );
-});
+}));
 
 router.post('/admin/logout', (req, res) => {
   res.setHeader('Set-Cookie', 'session=; Path=/; Max-Age=0');
@@ -119,8 +123,8 @@ function nav(active) {
   </div>`;
 }
 
-function baseUrl(req) {
-  const configured = (getSetting('base_url') || '').trim().replace(/\/+$/, '');
+async function baseUrl(req) {
+  const configured = ((await getSetting('base_url')) || '').trim().replace(/\/+$/, '');
   if (configured) return configured;
   const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   return `${proto}://${req.headers.host}`;
@@ -140,14 +144,16 @@ const STATUS_PILL = {
 
 // --- dashboard --------------------------------------------------------------
 
-router.get('/admin', requireAdmin, (req, res) => {
-  const active = getActiveWalkthrough();
-  const alerts = unacknowledgedAlerts();
-  const checkpoints = listCheckpoints(true);
+router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
+  await tick();
+
+  const active = await getActiveWalkthrough();
+  const alerts = await unacknowledgedAlerts();
+  const checkpoints = await listCheckpoints(true);
 
   let liveCard;
   if (active) {
-    const scans = getScans(active.id);
+    const scans = await getScans(active.id);
     const scannedIds = new Set(scans.map((s) => s.checkpoint_id));
     const total = checkpoints.length;
     const pct = total === 0 ? 100 : Math.round((scans.length / total) * 100);
@@ -213,17 +219,17 @@ router.get('/admin', requireAdmin, (req, res) => {
       { refreshSeconds: 10 }
     )
   );
-});
+}));
 
-router.post('/admin/alerts/:id/ack', requireAdmin, (req, res) => {
-  acknowledgeAlert(req.params.id);
+router.post('/admin/alerts/:id/ack', wrap(requireAdmin), wrap(async (req, res) => {
+  await acknowledgeAlert(req.params.id);
   res.redirect('/admin');
-});
+}));
 
 // --- checkpoints ------------------------------------------------------------
 
-router.get('/admin/checkpoints', requireAdmin, (req, res) => {
-  const checkpoints = listCheckpoints();
+router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
+  const checkpoints = await listCheckpoints();
   res.send(
     page(
       'Checkpoints — School Tag',
@@ -261,31 +267,31 @@ router.get('/admin/checkpoints', requireAdmin, (req, res) => {
        </div>`
     )
   );
-});
+}));
 
-router.post('/admin/checkpoints', requireAdmin, (req, res) => {
+router.post('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const name = (req.body.name || '').trim().slice(0, 120);
   const location = (req.body.location || '').trim().slice(0, 200);
-  if (name) addCheckpoint(name, location);
+  if (name) await addCheckpoint(name, location);
   res.redirect('/admin/checkpoints');
-});
+}));
 
-router.post('/admin/checkpoints/:id/toggle', requireAdmin, (req, res) => {
-  const cp = getCheckpoint(req.params.id);
-  if (cp) updateCheckpoint(cp.id, { active: !cp.active });
+router.post('/admin/checkpoints/:id/toggle', wrap(requireAdmin), wrap(async (req, res) => {
+  const cp = await getCheckpoint(req.params.id);
+  if (cp) await updateCheckpoint(cp.id, { active: !cp.active });
   res.redirect('/admin/checkpoints');
-});
+}));
 
-router.post('/admin/checkpoints/:id/delete', requireAdmin, (req, res) => {
-  deleteCheckpoint(req.params.id);
+router.post('/admin/checkpoints/:id/delete', wrap(requireAdmin), wrap(async (req, res) => {
+  await deleteCheckpoint(req.params.id);
   res.redirect('/admin/checkpoints');
-});
+}));
 
 // --- printable tag sheet ----------------------------------------------------
 
-router.get('/admin/tags', requireAdmin, async (req, res) => {
-  const checkpoints = listCheckpoints(true);
-  const base = baseUrl(req);
+router.get('/admin/tags', wrap(requireAdmin), wrap(async (req, res) => {
+  const checkpoints = await listCheckpoints(true);
+  const base = await baseUrl(req);
   const cards = await Promise.all(
     checkpoints.map(async (c) => {
       const url = `${base}/t/${c.id}`;
@@ -314,12 +320,12 @@ router.get('/admin/tags', requireAdmin, async (req, res) => {
        ${checkpoints.length === 0 ? '<p class="muted">No active checkpoints. Add them on the Checkpoints page first.</p>' : ''}`
     )
   );
-});
+}));
 
 // --- history ----------------------------------------------------------------
 
-router.get('/admin/history', requireAdmin, (req, res) => {
-  const walks = listWalkthroughs(50);
+router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
+  const walks = await listWalkthroughs(50);
   res.send(
     page(
       'History — School Tag',
@@ -344,14 +350,14 @@ router.get('/admin/history', requireAdmin, (req, res) => {
        </div>`
     )
   );
-});
+}));
 
-router.get('/admin/history/:id', requireAdmin, (req, res) => {
-  const w = getWalkthrough(req.params.id);
+router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
+  const w = await getWalkthrough(req.params.id);
   if (!w) return res.redirect('/admin/history');
-  const scans = getScans(w.id);
-  const missing = w.status === 'in_progress' ? getMissingCheckpoints(w.id) : [];
-  const allCheckpoints = listCheckpoints();
+  const scans = await getScans(w.id);
+  const missing = w.status === 'in_progress' ? await getMissingCheckpoints(w.id) : [];
+  const allCheckpoints = await listCheckpoints();
   const scannedIds = new Set(scans.map((s) => s.checkpoint_id));
   const missed = allCheckpoints.filter((c) => c.active && !scannedIds.has(c.id));
   res.send(
@@ -377,11 +383,16 @@ router.get('/admin/history/:id', requireAdmin, (req, res) => {
        }`
     )
   );
-});
+}));
 
 // --- settings ---------------------------------------------------------------
 
-router.get('/admin/settings', requireAdmin, (req, res) => {
+router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
+  const walkDurationMinutes = await getSetting('walk_duration_minutes');
+  const ntfyTopic = await getSetting('ntfy_topic');
+  const webhookUrl = await getSetting('webhook_url');
+  const baseUrlValue = await getSetting('base_url');
+  const adminPin = await getSetting('admin_pin');
   res.send(
     page(
       'Settings — School Tag',
@@ -391,53 +402,59 @@ router.get('/admin/settings', requireAdmin, (req, res) => {
          <div class="card">
            <h2>Walkthrough</h2>
            <label for="walk_duration_minutes">Time limit for one walkthrough (minutes). If the guard has not scanned every tag within this time, an alert is sent.</label>
-           <input id="walk_duration_minutes" name="walk_duration_minutes" type="number" min="5" max="720" value="${esc(getSetting('walk_duration_minutes'))}">
+           <input id="walk_duration_minutes" name="walk_duration_minutes" type="number" min="5" max="720" value="${esc(walkDurationMinutes)}">
          </div>
          <div class="card">
            <h2>Alert delivery</h2>
            <label for="ntfy_topic">ntfy topic — install the free <b>ntfy</b> app on the phones that should receive alerts and subscribe them to this topic (pick something hard to guess, e.g. <code>myschool-security-x7k2</code>)</label>
-           <input id="ntfy_topic" name="ntfy_topic" value="${esc(getSetting('ntfy_topic'))}" placeholder="myschool-security-x7k2">
+           <input id="ntfy_topic" name="ntfy_topic" value="${esc(ntfyTopic)}" placeholder="myschool-security-x7k2">
            <label for="webhook_url">Webhook URL (optional) — alerts are also POSTed here as JSON</label>
-           <input id="webhook_url" name="webhook_url" value="${esc(getSetting('webhook_url'))}" placeholder="https://...">
+           <input id="webhook_url" name="webhook_url" value="${esc(webhookUrl)}" placeholder="https://...">
          </div>
          <div class="card">
            <h2>System</h2>
            <label for="base_url">Public base URL of this server (used in tag URLs and QR codes)</label>
-           <input id="base_url" name="base_url" value="${esc(getSetting('base_url'))}" placeholder="https://security.myschool.ge">
+           <input id="base_url" name="base_url" value="${esc(baseUrlValue)}" placeholder="https://security.myschool.ge">
            <label for="admin_pin">Admin PIN</label>
-           <input id="admin_pin" name="admin_pin" value="${esc(getSetting('admin_pin'))}">
+           <input id="admin_pin" name="admin_pin" value="${esc(adminPin)}">
          </div>
          <button class="btn" type="submit">Save</button>
        </form>`
     )
   );
-});
+}));
 
-router.post('/admin/settings', requireAdmin, (req, res) => {
+router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin']) {
-    if (req.body[key] !== undefined) setSetting(key, String(req.body[key]).trim());
+    if (req.body[key] !== undefined) await setSetting(key, String(req.body[key]).trim());
   }
   res.redirect('/admin/settings');
-});
+}));
 
 // --- JSON state (for integrations / monitoring) ----------------------------
 
-router.get('/api/state', requireAdmin, (req, res) => {
-  const active = getActiveWalkthrough();
+router.get('/api/state', wrap(requireAdmin), wrap(async (req, res) => {
+  const active = await getActiveWalkthrough();
+  const activeCheckpoints = await listCheckpoints(true);
+  let walkthrough = null;
+  if (active) {
+    const scans = await getScans(active.id);
+    const missing = await getMissingCheckpoints(active.id);
+    walkthrough = {
+      id: active.id,
+      guard: active.guard_name,
+      started_at: active.started_at,
+      deadline: active.deadline,
+      scanned: scans.length,
+      missing: missing.map((c) => c.name),
+    };
+  }
+  const alerts = await unacknowledgedAlerts();
   res.json({
-    checkpoints: listCheckpoints(true).length,
-    walkthrough: active
-      ? {
-          id: active.id,
-          guard: active.guard_name,
-          started_at: active.started_at,
-          deadline: active.deadline,
-          scanned: getScans(active.id).length,
-          missing: getMissingCheckpoints(active.id).map((c) => c.name),
-        }
-      : null,
-    unacknowledged_alerts: unacknowledgedAlerts().length,
+    checkpoints: activeCheckpoints.length,
+    walkthrough,
+    unacknowledged_alerts: alerts.length,
   });
-});
+}));
 
 module.exports = router;

@@ -14,18 +14,21 @@ const {
   getMissingCheckpoints,
   finishWalkthrough,
 } = require('../db');
-const { closeIncomplete } = require('../scheduler');
+const { tick, closeIncomplete } = require('../scheduler');
 const { esc, page } = require('../html');
 
 const router = express.Router();
+
+// Express 4 does not catch async handler rejections — route them to next().
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 function minutesLeft(walkthrough) {
   return Math.max(0, Math.round((new Date(walkthrough.deadline).getTime() - Date.now()) / 60000));
 }
 
-function progressView(walkthrough, justScanned) {
-  const scans = getScans(walkthrough.id);
-  const missing = getMissingCheckpoints(walkthrough.id);
+async function progressView(walkthrough, justScanned) {
+  const scans = await getScans(walkthrough.id);
+  const missing = await getMissingCheckpoints(walkthrough.id);
   const total = scans.length + missing.length;
   const pct = total === 0 ? 100 : Math.round((scans.length / total) * 100);
   const left = minutesLeft(walkthrough);
@@ -79,8 +82,10 @@ function progressView(walkthrough, justScanned) {
 }
 
 // The URL written on each NFC tag: /t/<checkpoint id>
-router.get('/t/:id', (req, res) => {
-  const checkpoint = getCheckpoint(req.params.id);
+router.get('/t/:id', wrap(async (req, res) => {
+  await tick();
+
+  const checkpoint = await getCheckpoint(req.params.id);
   if (!checkpoint || !checkpoint.active) {
     res.status(404).send(
       page(
@@ -93,10 +98,10 @@ router.get('/t/:id', (req, res) => {
     return;
   }
 
-  const active = getActiveWalkthrough();
+  const active = await getActiveWalkthrough();
   if (active) {
-    recordScan(active.id, checkpoint.id);
-    res.send(page(`✓ ${checkpoint.name}`, progressView(active, checkpoint), { lang: 'ka' }));
+    await recordScan(active.id, checkpoint.id);
+    res.send(page(`✓ ${checkpoint.name}`, await progressView(active, checkpoint), { lang: 'ka' }));
     return;
   }
 
@@ -118,22 +123,24 @@ router.get('/t/:id', (req, res) => {
       { lang: 'ka' }
     )
   );
-});
+}));
 
-router.post('/walkthrough/start', (req, res) => {
-  const walkthrough = startWalkthrough((req.body.guard_name || '').trim().slice(0, 80));
+router.post('/walkthrough/start', wrap(async (req, res) => {
+  const walkthrough = await startWalkthrough((req.body.guard_name || '').trim().slice(0, 80));
   const checkpointId = req.body.checkpoint_id;
-  if (checkpointId && getCheckpoint(checkpointId)) {
-    recordScan(walkthrough.id, checkpointId);
+  if (checkpointId && (await getCheckpoint(checkpointId))) {
+    await recordScan(walkthrough.id, checkpointId);
     res.redirect(`/t/${encodeURIComponent(checkpointId)}`);
     return;
   }
   res.redirect('/walk');
-});
+}));
 
 // Live progress page (also linked from the dashboard).
-router.get('/walk', (req, res) => {
-  const active = getActiveWalkthrough();
+router.get('/walk', wrap(async (req, res) => {
+  await tick();
+
+  const active = await getActiveWalkthrough();
   if (!active) {
     res.send(
       page(
@@ -152,21 +159,23 @@ router.get('/walk', (req, res) => {
     );
     return;
   }
-  res.send(page('Walkthrough', progressView(active), { lang: 'ka', refreshSeconds: 15 }));
-});
+  res.send(page('Walkthrough', await progressView(active), { lang: 'ka', refreshSeconds: 15 }));
+}));
 
-router.post('/walkthrough/finish', async (req, res) => {
-  const active = getActiveWalkthrough();
+router.post('/walkthrough/finish', wrap(async (req, res) => {
+  await tick();
+
+  const active = await getActiveWalkthrough();
   if (active) {
-    const missing = getMissingCheckpoints(active.id);
+    const missing = await getMissingCheckpoints(active.id);
     if (missing.length === 0) {
-      finishWalkthrough(active.id, 'completed');
+      await finishWalkthrough(active.id, 'completed');
     } else {
       await closeIncomplete(active, 'finished early by guard');
     }
   }
   res.redirect('/walk/done');
-});
+}));
 
 router.get('/walk/done', (req, res) => {
   res.send(

@@ -26,8 +26,7 @@ npm start        # listens on port 3000 (PORT=... to change)
 - **Guard page:** `http://<server>/walk`
 - Run tests with `npm test`.
 
-Node.js **22.5+** is required (uses the built-in SQLite; the
-"SQLite is an experimental feature" warning on startup is harmless).
+Node.js **20+** is required.
 
 ## Setting it up for your school
 
@@ -85,14 +84,45 @@ Duplicate taps are ignored; tag order doesn't matter.
 
 ## Deployment notes
 
-- The server must be reachable from the guards' phones — host it on any small
-  VPS, or on a school server exposed via HTTPS. HTTPS is strongly recommended
-  (put it behind Caddy/nginx or a Cloudflare tunnel).
+The server must be reachable from the guards' phones. There are two ways to
+host it:
+
+### Option A — Vercel (serverless)
+
+1. Import the repository in [Vercel](https://vercel.com). It deploys as a
+   serverless function (see `api/index.js` and `vercel.json`).
+2. Add a **Turso** database for persistent storage: either through the Vercel
+   Marketplace (Storage → Turso) or with a free account at
+   [turso.tech](https://turso.tech). This provides the `TURSO_DATABASE_URL`
+   and `TURSO_AUTH_TOKEN` environment variables — make sure both are set on
+   the Vercel project. Without them the app falls back to an ephemeral `/tmp`
+   database and **data will not persist** between invocations.
+3. Set a `CRON_SECRET` environment variable (any long random string). It
+   protects the `GET /api/cron/tick` endpoint that closes expired walkthroughs.
+4. **Alert timing.** Expired walkthroughs are also closed lazily whenever
+   someone opens a guard or admin page, but with no traffic an alert only
+   fires when the cron endpoint is hit. The bundled `vercel.json` schedule is
+   once per day (`0 6 * * *`) so Hobby-plan deploys don't fail. For timely
+   alerts either:
+   - upgrade to **Pro** and change the schedule in `vercel.json` to
+     `*/5 * * * *`, or
+   - on the Hobby plan, point a free external pinger (e.g.
+     [cron-job.org](https://cron-job.org)) at
+     `https://<your-app>.vercel.app/api/cron/tick?secret=<CRON_SECRET>`
+     every 5 minutes.
+
+### Option B — your own server / VPS
+
+- Host it on any small VPS, or on a school server exposed via HTTPS. HTTPS is
+  strongly recommended (put it behind Caddy/nginx or a Cloudflare tunnel).
+- Run `npm start` under a process manager, e.g. `systemd` or
+  `pm2 start server.js`.
 - Data lives in `data/school-tag.db` (SQLite). Back up that one file.
   Set `DATA_DIR=/path` to move it.
 - Set `TZ` (e.g. `TZ=Asia/Tbilisi`) so dashboard timestamps are local
   (defaults to Asia/Tbilisi for display).
-- Run it under a process manager, e.g. `systemd` or `pm2 start server.js`.
+- The built-in scheduler checks deadlines every 30 seconds — no external cron
+  needed.
 
 ## How it decides something was missed
 

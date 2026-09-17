@@ -1,28 +1,41 @@
 'use strict';
 
-const { DatabaseSync } = require('node:sqlite');
+const { createClient } = require('@libsql/client');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
+// Remote (Turso / libsql server) when configured, local file otherwise.
+const remoteUrl = process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || '';
 
-const db = new DatabaseSync(path.join(DATA_DIR, 'school-tag.db'));
+let client;
+if (remoteUrl) {
+  client = createClient({ url: remoteUrl, authToken: process.env.TURSO_AUTH_TOKEN });
+} else {
+  const DATA_DIR =
+    process.env.DATA_DIR ||
+    (process.env.VERCEL ? '/tmp/school-tag-data' : path.join(__dirname, '..', 'data'));
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (process.env.VERCEL) {
+    console.error(
+      '[db] WARNING: running on Vercel without TURSO_DATABASE_URL/LIBSQL_URL — using an ' +
+        'ephemeral /tmp database. Data WILL NOT persist between invocations. Set the ' +
+        'TURSO_DATABASE_URL and TURSO_AUTH_TOKEN environment variables.'
+    );
+  }
+  client = createClient({ url: 'file:' + path.join(DATA_DIR, 'school-tag.db') });
+}
 
-db.exec(`
-  PRAGMA journal_mode = WAL;
-
-  CREATE TABLE IF NOT EXISTS checkpoints (
+const SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS checkpoints (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     location TEXT NOT NULL DEFAULT '',
     sort_order INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS walkthroughs (
+  )`,
+  `CREATE TABLE IF NOT EXISTS walkthroughs (
     id TEXT PRIMARY KEY,
     guard_name TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
@@ -30,30 +43,38 @@ db.exec(`
     completed_at TEXT,
     status TEXT NOT NULL DEFAULT 'in_progress', -- in_progress | completed | incomplete
     total_checkpoints INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS scans (
+  )`,
+  `CREATE TABLE IF NOT EXISTS scans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     walkthrough_id TEXT NOT NULL,
     checkpoint_id TEXT NOT NULL,
     scanned_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (walkthrough_id, checkpoint_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS alerts (
+  )`,
+  `CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     walkthrough_id TEXT,
     type TEXT NOT NULL,
     message TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     acknowledged INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
+  )`,
+  `CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
-  );
-`);
+  )`,
+];
+
+async function initSchema() {
+  await client.batch(SCHEMA_STATEMENTS, 'write');
+}
+
+// Lazy init: schema creation runs once, before the first query.
+let ready = null;
+function ensureReady() {
+  ready ??= initSchema();
+  return ready;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -69,27 +90,42 @@ const DEFAULT_SETTINGS = {
   base_url: '',
 };
 
-function getSetting(key) {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+async function getSetting(key) {
+  await ensureReady();
+  const rs = await client.execute({ sql: 'SELECT value FROM settings WHERE key = ?', args: [key] });
+  const row = rs.rows[0];
   if (row) return row.value;
   return DEFAULT_SETTINGS[key] !== undefined ? DEFAULT_SETTINGS[key] : null;
 }
 
-function setSetting(key, value) {
-  db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).run(key, String(value));
+async function setSetting(key, value) {
+  await ensureReady();
+  await client.execute({
+    sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    args: [key, String(value)],
+  });
 }
 
-// Secret used to sign the admin session cookie; generated once per database.
-function getCookieSecret() {
-  let secret = db.prepare('SELECT value FROM settings WHERE key = ?').get('cookie_secret');
-  if (!secret) {
+// Secret used to sign the admin session cookie; generated once per database
+// and cached in memory after the first load.
+let cookieSecret = null;
+
+async function getCookieSecret() {
+  if (cookieSecret) return cookieSecret;
+  await ensureReady();
+  const rs = await client.execute({
+    sql: 'SELECT value FROM settings WHERE key = ?',
+    args: ['cookie_secret'],
+  });
+  const row = rs.rows[0];
+  if (row) {
+    cookieSecret = row.value;
+  } else {
     const value = crypto.randomBytes(32).toString('hex');
-    setSetting('cookie_secret', value);
-    return value;
+    await setSetting('cookie_secret', value);
+    cookieSecret = value;
   }
-  return secret.value;
+  return cookieSecret;
 }
 
 // --- checkpoints ----------------------------------------------------------
@@ -99,138 +135,172 @@ function newCheckpointId() {
   return crypto.randomBytes(4).toString('hex');
 }
 
-function listCheckpoints(activeOnly = false) {
+async function listCheckpoints(activeOnly = false) {
+  await ensureReady();
   const where = activeOnly ? 'WHERE active = 1' : '';
-  return db.prepare(`SELECT * FROM checkpoints ${where} ORDER BY sort_order, name`).all();
+  const rs = await client.execute(`SELECT * FROM checkpoints ${where} ORDER BY sort_order, name`);
+  return rs.rows;
 }
 
-function getCheckpoint(id) {
-  return db.prepare('SELECT * FROM checkpoints WHERE id = ?').get(id);
+async function getCheckpoint(id) {
+  await ensureReady();
+  const rs = await client.execute({ sql: 'SELECT * FROM checkpoints WHERE id = ?', args: [id] });
+  return rs.rows[0];
 }
 
-function addCheckpoint(name, location) {
+async function addCheckpoint(name, location) {
+  await ensureReady();
   const id = newCheckpointId();
-  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM checkpoints').get().m;
-  db.prepare('INSERT INTO checkpoints (id, name, location, sort_order) VALUES (?, ?, ?, ?)').run(
-    id,
-    name,
-    location || '',
-    max + 1
-  );
+  const maxRs = await client.execute('SELECT COALESCE(MAX(sort_order), 0) AS m FROM checkpoints');
+  const max = maxRs.rows[0].m;
+  await client.execute({
+    sql: 'INSERT INTO checkpoints (id, name, location, sort_order) VALUES (?, ?, ?, ?)',
+    args: [id, name, location || '', max + 1],
+  });
   return getCheckpoint(id);
 }
 
-function updateCheckpoint(id, fields) {
-  const cp = getCheckpoint(id);
+async function updateCheckpoint(id, fields) {
+  await ensureReady();
+  const cp = await getCheckpoint(id);
   if (!cp) return null;
-  db.prepare('UPDATE checkpoints SET name = ?, location = ?, active = ? WHERE id = ?').run(
-    fields.name !== undefined ? fields.name : cp.name,
-    fields.location !== undefined ? fields.location : cp.location,
-    fields.active !== undefined ? (fields.active ? 1 : 0) : cp.active,
-    id
-  );
+  await client.execute({
+    sql: 'UPDATE checkpoints SET name = ?, location = ?, active = ? WHERE id = ?',
+    args: [
+      fields.name !== undefined ? fields.name : cp.name,
+      fields.location !== undefined ? fields.location : cp.location,
+      fields.active !== undefined ? (fields.active ? 1 : 0) : cp.active,
+      id,
+    ],
+  });
   return getCheckpoint(id);
 }
 
-function deleteCheckpoint(id) {
-  db.prepare('DELETE FROM checkpoints WHERE id = ?').run(id);
+async function deleteCheckpoint(id) {
+  await ensureReady();
+  await client.execute({ sql: 'DELETE FROM checkpoints WHERE id = ?', args: [id] });
 }
 
 // --- walkthroughs ---------------------------------------------------------
 
-function getActiveWalkthrough() {
-  return db
-    .prepare("SELECT * FROM walkthroughs WHERE status = 'in_progress' ORDER BY started_at DESC LIMIT 1")
-    .get();
+async function getActiveWalkthrough() {
+  await ensureReady();
+  const rs = await client.execute(
+    "SELECT * FROM walkthroughs WHERE status = 'in_progress' ORDER BY started_at DESC LIMIT 1"
+  );
+  return rs.rows[0];
 }
 
-function startWalkthrough(guardName) {
-  const active = getActiveWalkthrough();
+async function startWalkthrough(guardName) {
+  await ensureReady();
+  const active = await getActiveWalkthrough();
   if (active) return active;
   const id = crypto.randomBytes(6).toString('hex');
   const started = new Date();
-  const durationMin = parseInt(getSetting('walk_duration_minutes'), 10) || 60;
+  const durationMin = parseInt(await getSetting('walk_duration_minutes'), 10) || 60;
   const deadline = new Date(started.getTime() + durationMin * 60 * 1000);
-  const total = listCheckpoints(true).length;
-  db.prepare(
-    'INSERT INTO walkthroughs (id, guard_name, started_at, deadline, total_checkpoints) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, guardName || '', started.toISOString(), deadline.toISOString(), total);
-  return db.prepare('SELECT * FROM walkthroughs WHERE id = ?').get(id);
+  const total = (await listCheckpoints(true)).length;
+  await client.execute({
+    sql: 'INSERT INTO walkthroughs (id, guard_name, started_at, deadline, total_checkpoints) VALUES (?, ?, ?, ?, ?)',
+    args: [id, guardName || '', started.toISOString(), deadline.toISOString(), total],
+  });
+  return getWalkthrough(id);
 }
 
-function recordScan(walkthroughId, checkpointId) {
-  db.prepare(
-    'INSERT INTO scans (walkthrough_id, checkpoint_id, scanned_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING'
-  ).run(walkthroughId, checkpointId, nowIso());
+async function recordScan(walkthroughId, checkpointId) {
+  await ensureReady();
+  await client.execute({
+    sql: 'INSERT INTO scans (walkthrough_id, checkpoint_id, scanned_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING',
+    args: [walkthroughId, checkpointId, nowIso()],
+  });
 }
 
-function getScans(walkthroughId) {
-  return db
-    .prepare(
-      `SELECT s.*, c.name AS checkpoint_name, c.location AS checkpoint_location
+async function getScans(walkthroughId) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: `SELECT s.*, c.name AS checkpoint_name, c.location AS checkpoint_location
        FROM scans s LEFT JOIN checkpoints c ON c.id = s.checkpoint_id
-       WHERE s.walkthrough_id = ? ORDER BY s.scanned_at`
-    )
-    .all(walkthroughId);
+       WHERE s.walkthrough_id = ? ORDER BY s.scanned_at`,
+    args: [walkthroughId],
+  });
+  return rs.rows;
 }
 
-function getMissingCheckpoints(walkthroughId) {
-  return db
-    .prepare(
-      `SELECT c.* FROM checkpoints c
+async function getMissingCheckpoints(walkthroughId) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: `SELECT c.* FROM checkpoints c
        WHERE c.active = 1
          AND c.id NOT IN (SELECT checkpoint_id FROM scans WHERE walkthrough_id = ?)
-       ORDER BY c.sort_order, c.name`
-    )
-    .all(walkthroughId);
+       ORDER BY c.sort_order, c.name`,
+    args: [walkthroughId],
+  });
+  return rs.rows;
 }
 
-function finishWalkthrough(walkthroughId, status) {
-  db.prepare('UPDATE walkthroughs SET status = ?, completed_at = ? WHERE id = ?').run(
-    status,
-    nowIso(),
-    walkthroughId
-  );
+async function finishWalkthrough(walkthroughId, status) {
+  await ensureReady();
+  await client.execute({
+    sql: 'UPDATE walkthroughs SET status = ?, completed_at = ? WHERE id = ?',
+    args: [status, nowIso(), walkthroughId],
+  });
 }
 
-function listWalkthroughs(limit = 30) {
-  return db
-    .prepare(
-      `SELECT w.*,
+async function listWalkthroughs(limit = 30) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: `SELECT w.*,
               (SELECT COUNT(*) FROM scans s WHERE s.walkthrough_id = w.id) AS scanned_count
-       FROM walkthroughs w ORDER BY w.started_at DESC LIMIT ?`
-    )
-    .all(limit);
+       FROM walkthroughs w ORDER BY w.started_at DESC LIMIT ?`,
+    args: [limit],
+  });
+  return rs.rows;
 }
 
-function getWalkthrough(id) {
-  return db.prepare('SELECT * FROM walkthroughs WHERE id = ?').get(id);
+async function getWalkthrough(id) {
+  await ensureReady();
+  const rs = await client.execute({ sql: 'SELECT * FROM walkthroughs WHERE id = ?', args: [id] });
+  return rs.rows[0];
 }
 
 // --- alerts ---------------------------------------------------------------
 
-function addAlert(walkthroughId, type, message) {
-  db.prepare('INSERT INTO alerts (walkthrough_id, type, message) VALUES (?, ?, ?)').run(
-    walkthroughId,
-    type,
-    message
-  );
+async function addAlert(walkthroughId, type, message) {
+  await ensureReady();
+  await client.execute({
+    sql: 'INSERT INTO alerts (walkthrough_id, type, message) VALUES (?, ?, ?)',
+    args: [walkthroughId, type, message],
+  });
 }
 
-function listAlerts(limit = 50) {
-  return db.prepare('SELECT * FROM alerts ORDER BY created_at DESC LIMIT ?').all(limit);
+async function listAlerts(limit = 50) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: 'SELECT * FROM alerts ORDER BY created_at DESC LIMIT ?',
+    args: [limit],
+  });
+  return rs.rows;
 }
 
-function unacknowledgedAlerts() {
-  return db.prepare('SELECT * FROM alerts WHERE acknowledged = 0 ORDER BY created_at DESC').all();
+async function unacknowledgedAlerts() {
+  await ensureReady();
+  const rs = await client.execute('SELECT * FROM alerts WHERE acknowledged = 0 ORDER BY created_at DESC');
+  return rs.rows;
 }
 
-function acknowledgeAlert(id) {
-  db.prepare('UPDATE alerts SET acknowledged = 1 WHERE id = ?').run(id);
+async function acknowledgeAlert(id) {
+  await ensureReady();
+  await client.execute({ sql: 'UPDATE alerts SET acknowledged = 1 WHERE id = ?', args: [id] });
+}
+
+// Escape hatch for tests/tooling.
+async function rawExecute(sql, args = []) {
+  await ensureReady();
+  return client.execute({ sql, args });
 }
 
 module.exports = {
-  db,
+  client,
   nowIso,
   getSetting,
   setSetting,
@@ -252,4 +322,5 @@ module.exports = {
   listAlerts,
   unacknowledgedAlerts,
   acknowledgeAlert,
+  rawExecute,
 };

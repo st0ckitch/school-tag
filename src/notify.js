@@ -12,7 +12,7 @@ const { getSetting } = require('./db');
 async function sendNotification(title, message, priority = 'high') {
   const results = [];
 
-  const ntfyTopic = (getSetting('ntfy_topic') || '').trim();
+  const ntfyTopic = ((await getSetting('ntfy_topic')) || '').trim();
   if (ntfyTopic) {
     try {
       const res = await fetch(`https://ntfy.sh/${encodeURIComponent(ntfyTopic)}`, {
@@ -30,7 +30,7 @@ async function sendNotification(title, message, priority = 'high') {
     }
   }
 
-  const webhookUrl = (getSetting('webhook_url') || '').trim();
+  const webhookUrl = ((await getSetting('webhook_url')) || '').trim();
   if (webhookUrl) {
     try {
       const res = await fetch(webhookUrl, {

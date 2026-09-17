@@ -9,9 +9,10 @@
     "test": "node --test \"test/*.test.js\""
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=20"
   },
   "dependencies": {
+    "@libsql/client": "^0.14.0",
     "express": "^4.19.2",
     "qrcode": "^1.5.4"
   }
