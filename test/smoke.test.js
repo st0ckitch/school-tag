@@ -111,6 +111,21 @@ test('completed walkthrough when all scanned', async () => {
   assert.equal((await db.getWalkthrough(w.id)).status, 'completed');
 });
 
+test('concurrent starts create only one walkthrough', async () => {
+  const results = await Promise.all([
+    db.startWalkthrough('GuardA'),
+    db.startWalkthrough('GuardB'),
+    db.startWalkthrough('GuardC'),
+  ]);
+  const rs = await db.rawExecute("SELECT COUNT(*) AS n FROM walkthroughs WHERE status = 'in_progress'");
+  assert.equal(rs.rows[0].n, 1);
+  const activeId = (await db.getActiveWalkthrough()).id;
+  for (const r of results) assert.equal(r.id, activeId);
+  // clean up for the following tests
+  for (const cp of await db.listCheckpoints(true)) await db.recordScan(activeId, cp.id);
+  await db.finishWalkthrough(activeId, 'completed');
+});
+
 test('admin requires PIN, then works', async () => {
   let res = await fetch(`${base}/admin`);
   assert.equal(res.status, 401);

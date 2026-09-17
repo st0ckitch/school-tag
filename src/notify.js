@@ -23,6 +23,7 @@ async function sendNotification(title, message, priority = 'high') {
           Tags: 'rotating_light',
         },
         body: message,
+        signal: AbortSignal.timeout(5000),
       });
       results.push({ channel: 'ntfy', ok: res.ok });
     } catch (err) {
@@ -37,6 +38,7 @@ async function sendNotification(title, message, priority = 'high') {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, message, text: `${title}\n${message}` }),
+        signal: AbortSignal.timeout(5000),
       });
       results.push({ channel: 'webhook', ok: res.ok });
     } catch (err) {

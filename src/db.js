@@ -63,16 +63,26 @@ const SCHEMA_STATEMENTS = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   )`,
+  // At most one walkthrough may be in progress; concurrent starts race on the
+  // check-then-insert in startWalkthrough(), so the database enforces it.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_walkthroughs_single_active
+    ON walkthroughs (status) WHERE status = 'in_progress'`,
 ];
 
 async function initSchema() {
   await client.batch(SCHEMA_STATEMENTS, 'write');
 }
 
-// Lazy init: schema creation runs once, before the first query.
+// Lazy init: schema creation runs once, before the first query. A failed
+// attempt must not stay cached, or one startup blip poisons the process.
 let ready = null;
 function ensureReady() {
-  ready ??= initSchema();
+  if (!ready) {
+    ready = initSchema();
+    ready.catch(() => {
+      ready = null;
+    });
+  }
   return ready;
 }
 
@@ -121,9 +131,18 @@ async function getCookieSecret() {
   if (row) {
     cookieSecret = row.value;
   } else {
+    // Two cold-starting instances can race here; DO NOTHING + re-read makes
+    // both cache whichever secret actually won, so cookies verify everywhere.
     const value = crypto.randomBytes(32).toString('hex');
-    await setSetting('cookie_secret', value);
-    cookieSecret = value;
+    await client.execute({
+      sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING',
+      args: ['cookie_secret', value],
+    });
+    const winner = await client.execute({
+      sql: 'SELECT value FROM settings WHERE key = ?',
+      args: ['cookie_secret'],
+    });
+    cookieSecret = winner.rows[0].value;
   }
   return cookieSecret;
 }
@@ -200,11 +219,13 @@ async function startWalkthrough(guardName) {
   const durationMin = parseInt(await getSetting('walk_duration_minutes'), 10) || 60;
   const deadline = new Date(started.getTime() + durationMin * 60 * 1000);
   const total = (await listCheckpoints(true)).length;
+  // The single-active unique index rejects a second in_progress row; DO
+  // NOTHING makes a concurrent start lose quietly, then we return the winner.
   await client.execute({
-    sql: 'INSERT INTO walkthroughs (id, guard_name, started_at, deadline, total_checkpoints) VALUES (?, ?, ?, ?, ?)',
+    sql: 'INSERT INTO walkthroughs (id, guard_name, started_at, deadline, total_checkpoints) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
     args: [id, guardName || '', started.toISOString(), deadline.toISOString(), total],
   });
-  return getWalkthrough(id);
+  return (await getWalkthrough(id)) || getActiveWalkthrough();
 }
 
 async function recordScan(walkthroughId, checkpointId) {

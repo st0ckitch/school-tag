@@ -21,9 +21,16 @@ app.get('/api/cron/tick', wrap(async (req, res) => {
   if (!secret) {
     return res.status(503).json({ error: 'CRON_SECRET not configured' });
   }
+  const timingSafe = (candidate) => {
+    if (typeof candidate !== 'string') return false;
+    const a = Buffer.from(candidate.padEnd(256).slice(0, 256));
+    const b = Buffer.from(secret.padEnd(256).slice(0, 256));
+    return candidate.length === secret.length && require('node:crypto').timingSafeEqual(a, b);
+  };
+  const auth = req.headers.authorization || '';
   const authorized =
-    req.headers.authorization === 'Bearer ' + secret ||
-    req.query.secret === secret;
+    (auth.startsWith('Bearer ') && timingSafe(auth.slice('Bearer '.length))) ||
+    timingSafe(req.query.secret);
   if (!authorized) {
     return res.status(401).json({ error: 'unauthorized' });
   }
