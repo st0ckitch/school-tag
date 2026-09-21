@@ -5,7 +5,7 @@
   "start_url": "/walk",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#f4f6f8",
+  "background_color": "#eef2f9",
   "theme_color": "#2563eb",
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
