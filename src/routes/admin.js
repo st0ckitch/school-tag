@@ -31,6 +31,10 @@ const router = express.Router();
 // Express 4 does not catch async handler rejections — route them to next().
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// Admin pages link the separate "School Tag Admin" manifest/icon, so the
+// dashboard installs as its own app on the administrator's phone.
+const adminPage = (title, body, opts = {}) => page(title, body, { ...opts, admin: true });
+
 // --- tiny signed-cookie session ------------------------------------------
 
 async function sign(value) {
@@ -57,7 +61,7 @@ async function hasSession(req) {
 async function requireAdmin(req, res, next) {
   if (await hasSession(req)) return next();
   res.status(401).send(
-    page(
+    adminPage(
       'Admin login',
       `<div class="card" style="max-width:360px;margin:60px auto">
          <h1>Admin login</h1>
@@ -86,7 +90,7 @@ router.post('/admin/login', wrap(async (req, res) => {
     return;
   }
   res.status(401).send(
-    page(
+    adminPage(
       'Admin login',
       `<div class="card" style="max-width:360px;margin:60px auto">
          <h1>Admin login</h1>
@@ -108,23 +112,38 @@ router.post('/admin/logout', (req, res) => {
 
 // --- helpers ---------------------------------------------------------------
 
+const NAV_ICONS = {
+  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
+  pin: '<path d="M12 21s-7-6.1-7-11a7 7 0 0 1 14 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.6"/>',
+  print: '<path d="M6 9V3h12v6"/><path d="M6 17H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2"/><path d="M6 13h12v8H6z"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  gear: '<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/><circle cx="9" cy="7" r="2" fill="var(--card-bg)"/><circle cx="15" cy="12" r="2" fill="var(--card-bg)"/><circle cx="7" cy="17" r="2" fill="var(--card-bg)"/>',
+  out: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
+};
+
+const navIcon = (name) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NAV_ICONS[name]}</svg>`;
+
 function nav(active) {
   const items = [
-    ['/admin', 'Dashboard'],
-    ['/admin/checkpoints', 'Checkpoints'],
-    ['/admin/tags', 'Tag sheet'],
-    ['/admin/devices', 'Devices'],
-    ['/admin/history', 'History'],
-    ['/admin/settings', 'Settings'],
+    ['/admin', 'Home', 'home'],
+    ['/admin/checkpoints', 'Points', 'pin'],
+    ['/admin/tags', 'Tags', 'print'],
+    ['/admin/devices', 'Devices', 'phone'],
+    ['/admin/history', 'History', 'clock'],
+    ['/admin/settings', 'Settings', 'gear'],
   ];
-  return `<div class="topnav no-print">
+  return `<nav class="topnav no-print">
     ${items
-      .map(([href, label]) =>
-        href === active ? `<span style="font-weight:700">${label}</span>` : `<a href="${href}">${label}</a>`
+      .map(([href, label, icon]) =>
+        href === active
+          ? `<span class="navitem active">${navIcon(icon)}<span class="navlbl">${label}</span></span>`
+          : `<a class="navitem" href="${href}">${navIcon(icon)}<span class="navlbl">${label}</span></a>`
       )
       .join('')}
-    <form method="post" action="/admin/logout" style="margin-left:auto"><button class="btn small secondary" type="submit">Log out</button></form>
-  </div>`;
+    <form method="post" action="/admin/logout" class="navout"><button class="navitem" type="submit" aria-label="Log out">${navIcon('out')}<span class="navlbl">Log out</span></button></form>
+  </nav>`;
 }
 
 async function baseUrl(req) {
@@ -195,6 +214,7 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
   const alertsCard = `
     <div class="card">
       <h2>Alerts ${alerts.length ? `<span class="pill bad">${alerts.length} new</span>` : '<span class="pill ok">none</span>'}</h2>
+      <button class="btn secondary small no-print" data-label="Admin device" data-done="Notifications enabled" data-denied="Blocked in browser settings" onclick="stEnablePush(this)" style="margin-bottom:12px">🔔 Enable alert notifications on this device</button>
       ${
         alerts.length
           ? `<ul class="plain">${alerts
@@ -213,7 +233,7 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
     </div>`;
 
   res.send(
-    page(
+    adminPage(
       'Dashboard — School Tag',
       `${nav('/admin')}
        <h1>School security dashboard</h1>
@@ -235,7 +255,7 @@ router.post('/admin/alerts/:id/ack', wrap(requireAdmin), wrap(async (req, res) =
 router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const checkpoints = await listCheckpoints();
   res.send(
-    page(
+    adminPage(
       'Checkpoints — School Tag',
       `${nav('/admin/checkpoints')}
        <h1>Checkpoints</h1>
@@ -309,7 +329,7 @@ router.get('/admin/tags', wrap(requireAdmin), wrap(async (req, res) => {
     })
   );
   res.send(
-    page(
+    adminPage(
       'Tag sheet — School Tag',
       `${nav('/admin/tags')}
        <div class="no-print card">
@@ -342,7 +362,7 @@ async function devicesPage(req, enrollUrl) {
        </div>`
     : '';
 
-  return page(
+  return adminPage(
     'Devices — School Tag',
     `${nav('/admin/devices')}
      <h1>Allowed devices</h1>
@@ -407,7 +427,7 @@ router.post('/admin/devices/settings', wrap(requireAdmin), wrap(async (req, res)
 router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
   const walks = await listWalkthroughs(50);
   res.send(
-    page(
+    adminPage(
       'History — School Tag',
       `${nav('/admin/history')}
        <h1>Walkthrough history</h1>
@@ -441,7 +461,7 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
   const scannedIds = new Set(scans.map((s) => s.checkpoint_id));
   const missed = allCheckpoints.filter((c) => c.active && !scannedIds.has(c.id));
   res.send(
-    page(
+    adminPage(
       'Walkthrough — School Tag',
       `${nav('/admin/history')}
        <h1>Walkthrough ${fmtTime(w.started_at)}</h1>
@@ -473,8 +493,10 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const webhookUrl = await getSetting('webhook_url');
   const baseUrlValue = await getSetting('base_url');
   const adminPin = await getSetting('admin_pin');
+  const androidPackage = (await getSetting('android_package')) || '';
+  const androidSha256 = (await getSetting('android_sha256')) || '';
   res.send(
-    page(
+    adminPage(
       'Settings — School Tag',
       `${nav('/admin/settings')}
        <h1>Settings</h1>
@@ -498,6 +520,14 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <label for="admin_pin">Admin PIN</label>
            <input id="admin_pin" name="admin_pin" value="${esc(adminPin)}">
          </div>
+         <div class="card">
+           <h2>Android APK</h2>
+           <p class="muted">Fill these after building the APK (the build prints both values) to verify the app and hide the browser bar. Served at <code>/.well-known/assetlinks.json</code>.</p>
+           <label for="android_package">Package id</label>
+           <input id="android_package" name="android_package" value="${esc(androidPackage)}" placeholder="com.schooltag.app">
+           <label for="android_sha256">Signing certificate SHA-256 fingerprint</label>
+           <input id="android_sha256" name="android_sha256" value="${esc(androidSha256)}" placeholder="AA:BB:CC:...">
+         </div>
          <button class="btn" type="submit">Save</button>
        </form>`
     )
@@ -505,7 +535,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
 }));
 
 router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
-  for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin']) {
+  for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin', 'android_package', 'android_sha256']) {
     if (req.body[key] !== undefined) await setSetting(key, String(req.body[key]).trim());
   }
   res.redirect('/admin/settings');
@@ -538,3 +568,5 @@ router.get('/api/state', wrap(requireAdmin), wrap(async (req, res) => {
 }));
 
 module.exports = router;
+// Reused by server.js to authorize push subscriptions from an admin browser.
+module.exports.hasSession = hasSession;

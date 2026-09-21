@@ -83,6 +83,7 @@ async function progressView(walkthrough, justScanned) {
     </div>
     ${missingList}
     ${finishEarly}
+    <button class="btn secondary full no-print" data-label="Guard phone" data-done="ჩართულია / Enabled" data-denied="დაბლოკილია / Blocked" onclick="stEnablePush(this)">🔔 შეტყობინებების ჩართვა / Enable notifications</button>
   `;
 }
 

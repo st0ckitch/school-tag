@@ -1,6 +1,59 @@
 'use strict';
 
-const { getSetting } = require('./db');
+const webpush = require('web-push');
+const { getSetting, setSetting, listPushSubscriptions, deletePushSubscription } = require('./db');
+
+// VAPID keys identify this server to browser push services; generated once
+// and stored in the database.
+let vapidReady = null;
+async function getVapidKeys() {
+  vapidReady ??= (async () => {
+    let publicKey = await getSetting('vapid_public');
+    let privateKey = await getSetting('vapid_private');
+    if (!publicKey || !privateKey) {
+      const keys = webpush.generateVAPIDKeys();
+      publicKey = keys.publicKey;
+      privateKey = keys.privateKey;
+      await setSetting('vapid_public', publicKey);
+      await setSetting('vapid_private', privateKey);
+    }
+    return { publicKey, privateKey };
+  })();
+  try {
+    return await vapidReady;
+  } catch (err) {
+    vapidReady = null;
+    throw err;
+  }
+}
+
+// Native push to every subscribed phone (installed app / APK). Dead
+// subscriptions (uninstalled app, revoked permission) are pruned.
+async function sendWebPush(title, message) {
+  const subs = await listPushSubscriptions();
+  if (subs.length === 0) return { channel: 'webpush', ok: true, sent: 0 };
+  const { publicKey, privateKey } = await getVapidKeys();
+  const subject = (await getSetting('base_url')) || 'https://github.com/st0ckitch/school-tag';
+  const payload = JSON.stringify({ title, body: message, url: '/admin' });
+  let sent = 0;
+  for (const sub of subs) {
+    try {
+      await webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+        payload,
+        { vapidDetails: { subject, publicKey, privateKey }, TTL: 3600 }
+      );
+      sent++;
+    } catch (err) {
+      if (err.statusCode === 404 || err.statusCode === 410) {
+        await deletePushSubscription(sub.endpoint);
+      } else {
+        console.error('[notify] webpush delivery failed:', err.statusCode || err.message);
+      }
+    }
+  }
+  return { channel: 'webpush', ok: true, sent };
+}
 
 // Sends an alert to the configured device(s).
 //
@@ -11,6 +64,12 @@ const { getSetting } = require('./db');
 //    (Slack, Telegram bot relay, an in-house system, ...).
 async function sendNotification(title, message, priority = 'high') {
   const results = [];
+
+  try {
+    results.push(await sendWebPush(title, message));
+  } catch (err) {
+    results.push({ channel: 'webpush', ok: false, error: err.message });
+  }
 
   const ntfyTopic = ((await getSetting('ntfy_topic')) || '').trim();
   if (ntfyTopic) {
@@ -52,4 +111,4 @@ async function sendNotification(title, message, priority = 'high') {
   return results;
 }
 
-module.exports = { sendNotification };
+module.exports = { sendNotification, getVapidKeys };

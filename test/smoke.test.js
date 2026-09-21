@@ -188,6 +188,65 @@ test('device limit: enrollment, enforcement, and the two-device cap', async () =
   }
 });
 
+test('web push: VAPID key, subscribe validation, and device gating', async () => {
+  const res = await fetch(`${base}/push/key`);
+  assert.equal(res.status, 200);
+  const { key } = await res.json();
+  assert.ok(typeof key === 'string' && key.length > 60, 'VAPID public key served');
+
+  const goodSub = {
+    subscription: { endpoint: 'https://push.example.com/abc', keys: { p256dh: 'k1', auth: 'a1' } },
+    label: 'Test phone',
+  };
+
+  // Invalid payload rejected
+  let bad = await fetch(`${base}/push/subscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subscription: { endpoint: 'http://insecure' } }),
+  });
+  assert.equal(bad.status, 400);
+
+  // Valid subscription accepted while enforcement is off
+  let ok = await fetch(`${base}/push/subscribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(goodSub),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await db.listPushSubscriptions()).length, 1);
+
+  // With device enforcement on, anonymous subscribe is rejected
+  await db.setSetting('require_enrolled_device', '1');
+  try {
+    const denied = await fetch(`${base}/push/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(goodSub),
+    });
+    assert.equal(denied.status, 403);
+  } finally {
+    await db.setSetting('require_enrolled_device', '0');
+  }
+  await db.deletePushSubscription('https://push.example.com/abc');
+});
+
+test('assetlinks.json served only when configured', async () => {
+  let res = await fetch(`${base}/.well-known/assetlinks.json`);
+  assert.equal(res.status, 404);
+  await db.setSetting('android_package', 'com.schooltag.app');
+  await db.setSetting('android_sha256', 'AA:BB');
+  try {
+    res = await fetch(`${base}/.well-known/assetlinks.json`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body[0].target.package_name, 'com.schooltag.app');
+  } finally {
+    await db.setSetting('android_package', '');
+    await db.setSetting('android_sha256', '');
+  }
+});
+
 test('PWA assets are served', async () => {
   const manifest = await fetch(`${base}/manifest.webmanifest`);
   assert.equal(manifest.status, 200);

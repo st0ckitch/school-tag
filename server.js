@@ -5,6 +5,9 @@ const path = require('node:path');
 const guardRoutes = require('./src/routes/guard');
 const adminRoutes = require('./src/routes/admin');
 const { startScheduler, tick } = require('./src/scheduler');
+const { getVapidKeys } = require('./src/notify');
+const { currentDevice } = require('./src/device');
+const { getSetting, addPushSubscription } = require('./src/db');
 
 const app = express();
 app.disable('x-powered-by');
@@ -38,6 +41,43 @@ app.get('/api/cron/tick', wrap(async (req, res) => {
   }
   await tick();
   res.json({ ok: true });
+}));
+
+// --- web push ---------------------------------------------------------------
+
+app.get('/push/key', wrap(async (req, res) => {
+  const { publicKey } = await getVapidKeys();
+  res.json({ key: publicKey });
+}));
+
+app.post('/push/subscribe', wrap(async (req, res) => {
+  // Same trust rule as scanning: with device enforcement on, only enrolled
+  // phones or a logged-in admin browser may receive alert pushes.
+  const enforcing = (await getSetting('require_enrolled_device')) === '1';
+  if (enforcing && !(await currentDevice(req)) && !(await adminRoutes.hasSession(req))) {
+    return res.status(403).json({ error: 'not authorized' });
+  }
+  const sub = req.body && req.body.subscription;
+  if (!sub || typeof sub.endpoint !== 'string' || !sub.endpoint.startsWith('https://') || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    return res.status(400).json({ error: 'invalid subscription' });
+  }
+  const label = String(req.body.label || '').slice(0, 80);
+  await addPushSubscription(sub.endpoint, String(sub.keys.p256dh), String(sub.keys.auth), label);
+  res.json({ ok: true });
+}));
+
+// Digital Asset Links for the Android APK (Trusted Web Activity): filled from
+// Settings once the APK's signing fingerprint is known; hides the URL bar.
+app.get('/.well-known/assetlinks.json', wrap(async (req, res) => {
+  const pkg = ((await getSetting('android_package')) || '').trim();
+  const sha256 = ((await getSetting('android_sha256')) || '').trim();
+  if (!pkg || !sha256) return res.status(404).json({ error: 'not configured' });
+  res.json([
+    {
+      relation: ['delegate_permission/common.handle_all_urls'],
+      target: { namespace: 'android_app', package_name: pkg, sha256_cert_fingerprints: [sha256] },
+    },
+  ]);
 }));
 
 // Final error handler — Express 4 needs all four args to treat this as one.

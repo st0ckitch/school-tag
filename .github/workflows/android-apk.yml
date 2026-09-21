@@ -1,0 +1,89 @@
+name: Build Android APK
+
+# Manual build: GitHub → Actions → "Build Android APK" → Run workflow.
+# Enter your deployed app's HTTPS URL; download the APK from the run's
+# artifacts when it finishes (~3-4 minutes).
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: "Public HTTPS URL of the deployed app (e.g. https://school-tag-production.up.railway.app)"
+        required: true
+        type: string
+      package_id:
+        description: "Android package id"
+        required: false
+        default: "com.schooltag.app"
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Reuses the keystore from repo secrets when present, otherwise
+      # generates one. Keep the same keystore across builds or Android will
+      # refuse to update the installed app (see README).
+      - name: Prepare signing keystore
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_B64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/keystore.jks"
+            echo "KS_PASS=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "KS_GENERATED=no" >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -keystore "$RUNNER_TEMP/keystore.jks" -alias schooltag \
+              -storepass schooltag123 -keypass schooltag123 -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=School Tag"
+            echo "KS_PASS=schooltag123" >> "$GITHUB_ENV"
+            echo "KS_GENERATED=yes" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          gradle wrapper --gradle-version 8.7 --no-daemon
+          ./gradlew assembleRelease --no-daemon \
+            -PappUrl="${{ inputs.app_url }}" \
+            -PappPackage="${{ inputs.package_id }}" \
+            -PversionCode="${{ github.run_number }}" \
+            -PversionName="1.${{ github.run_number }}" \
+            -PstoreFile="$RUNNER_TEMP/keystore.jks" \
+            -PstorePassword="$KS_PASS" \
+            -PkeyAlias=schooltag \
+            -PkeyPassword="$KS_PASS"
+
+      - name: Fingerprint and assetlinks.json
+        run: |
+          FP=$(keytool -list -keystore "$RUNNER_TEMP/keystore.jks" -alias schooltag \
+                -storepass "$KS_PASS" -v | grep 'SHA256:' | head -1 | sed 's/.*SHA256: //')
+          echo "### Android app values for Admin → Settings → Android APK" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Package id: \`${{ inputs.package_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SHA-256 fingerprint: \`$FP\`" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/app-release.apk out/school-tag.apk
+          cat > out/assetlinks.json <<EOF
+          [{"relation": ["delegate_permission/common.handle_all_urls"],
+            "target": {"namespace": "android_app", "package_name": "${{ inputs.package_id }}",
+                       "sha256_cert_fingerprints": ["$FP"]}}]
+          EOF
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: school-tag-apk
+          path: |
+            out/school-tag.apk
+            out/assetlinks.json
+
+      - name: Upload keystore (first build only — add it as a secret!)
+        if: env.KS_GENERATED == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signing-keystore-SAVE-THIS
+          path: ${{ runner.temp }}/keystore.jks

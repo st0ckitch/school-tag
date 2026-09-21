@@ -76,6 +76,13 @@ const SCHEMA_STATEMENTS = [
     expires_at TEXT NOT NULL,
     used INTEGER NOT NULL DEFAULT 0
   )`,
+  `CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  )`,
   // At most one walkthrough may be in progress; concurrent starts race on the
   // check-then-insert in startWalkthrough(), so the database enforces it.
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_walkthroughs_single_active
@@ -406,6 +413,28 @@ async function deleteDevice(id) {
   await client.execute({ sql: 'DELETE FROM devices WHERE id = ?', args: [id] });
 }
 
+// --- web push subscriptions -------------------------------------------------
+
+async function addPushSubscription(endpoint, p256dh, auth, label) {
+  await ensureReady();
+  await client.execute({
+    sql: `INSERT INTO push_subscriptions (endpoint, p256dh, auth, label) VALUES (?, ?, ?, ?)
+          ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, label = excluded.label`,
+    args: [endpoint, p256dh, auth, label || ''],
+  });
+}
+
+async function listPushSubscriptions() {
+  await ensureReady();
+  const rs = await client.execute('SELECT * FROM push_subscriptions');
+  return rs.rows;
+}
+
+async function deletePushSubscription(endpoint) {
+  await ensureReady();
+  await client.execute({ sql: 'DELETE FROM push_subscriptions WHERE endpoint = ?', args: [endpoint] });
+}
+
 // Escape hatch for tests/tooling.
 async function rawExecute(sql, args = []) {
   await ensureReady();
@@ -443,5 +472,8 @@ module.exports = {
   validateDevice,
   touchDevice,
   deleteDevice,
+  addPushSubscription,
+  listPushSubscriptions,
+  deletePushSubscription,
   rawExecute,
 };

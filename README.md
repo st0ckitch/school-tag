@@ -84,15 +84,51 @@ Duplicate taps are ignored; tag order doesn't matter.
 
 ### 5. Install it as an app on the phones (PWA)
 
-The site is an installable web app — no app store needed:
+There are **two separate installable apps** on the same server — no app store
+needed:
 
-- **Android (Chrome):** open the site → browser menu → **Add to Home screen /
-  Install app**.
-- **iPhone (Safari):** open the site → Share button → **Add to Home Screen**.
+- **Guard app** (blue check icon): install from `/walk` — opens straight into
+  the walkthrough flow.
+- **Admin app** (dark gear icon): install from `/admin` — opens straight into
+  the dashboard.
 
-The icon launches the guard page fullscreen like a native app. Note that iOS
-does not allow installing apps from outside the App Store, so this is the
-direct-install path on iPhones; on Android it replaces the need for an APK.
+Installing: **Android (Chrome):** open the page → browser menu → **Install
+app / Add to Home screen**. **iPhone (Safari):** open the page → Share →
+**Add to Home Screen** (iOS allows no direct APK-style installs, so this is
+the direct path there).
+
+### 5a. Push notifications
+
+Alerts are pushed natively (Web Push) to every device that pressed the
+**🔔 Enable notifications** button — it's on the guard walkthrough page and
+on the admin dashboard. Works in the installed app on Android (and inside
+the APK below), on desktop Chrome/Edge/Firefox, and on iPhone when the app
+is installed to the home screen (iOS 16.4+). With device enforcement on,
+only enrolled phones and logged-in admins can subscribe. No third-party
+account is needed; ntfy/webhook remain as optional extra channels.
+
+### 5b. Real Android APK (optional)
+
+The repo ships an Android **Trusted Web Activity** project plus a GitHub
+Actions workflow that builds an installable, signed APK:
+
+1. On GitHub: **Actions → Build Android APK → Run workflow**, enter your
+   deployed HTTPS URL. Wait ~3–4 minutes.
+2. Download the **school-tag-apk** artifact from the run page; copy
+   `school-tag.apk` to the phone and open it (allow "install unknown apps").
+3. First build only: also download **signing-keystore-SAVE-THIS** and add
+   repo secrets `ANDROID_KEYSTORE_B64` (the file base64-encoded) and
+   `ANDROID_KEYSTORE_PASSWORD` (`schooltag123` for a generated keystore) —
+   future builds must be signed with the same key or Android refuses the
+   update.
+4. The run summary prints the **package id** and **SHA-256 fingerprint**:
+   paste both into Admin → Settings → *Android APK* (served back at
+   `/.well-known/assetlinks.json`) to verify the app and hide the browser
+   bar inside it.
+
+The APK wraps the same app, so push notifications, device enrollment, and
+updates to the server all work in it without rebuilding; rebuild only to
+change the URL or icon.
 
 ### 6. Limit access to specific phones (device enrollment)
 
