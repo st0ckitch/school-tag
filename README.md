@@ -82,6 +82,35 @@ Admin → **Settings**:
 
 Duplicate taps are ignored; tag order doesn't matter.
 
+### 5. Install it as an app on the phones (PWA)
+
+The site is an installable web app — no app store needed:
+
+- **Android (Chrome):** open the site → browser menu → **Add to Home screen /
+  Install app**.
+- **iPhone (Safari):** open the site → Share button → **Add to Home Screen**.
+
+The icon launches the guard page fullscreen like a native app. Note that iOS
+does not allow installing apps from outside the App Store, so this is the
+direct-install path on iPhones; on Android it replaces the need for an APK.
+
+### 6. Limit access to specific phones (device enrollment)
+
+Guard pages can be restricted to a fixed number of enrolled phones
+(default 2) in Admin → **Devices**:
+
+1. Press **Generate enrollment link** — a one-time link/QR valid for
+   30 minutes appears.
+2. Open it on the phone you want to allow and press **Enroll**. The phone
+   receives a long-lived secret cookie; only its hash is stored server-side.
+3. Repeat for the second phone, then tick **Only enrolled devices can scan
+   tags and run walkthroughs** and save.
+
+Enrolled devices are listed with last-seen times and can be removed at any
+time (access is revoked immediately). If a phone's browser data is cleared,
+just enroll it again with a fresh link. The admin dashboard itself is
+protected by the PIN, not by device enrollment.
+
 ## Deployment notes
 
 The server must be reachable from the guards' phones. There are two ways to

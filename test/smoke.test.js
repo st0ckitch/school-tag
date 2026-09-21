@@ -126,6 +126,79 @@ test('concurrent starts create only one walkthrough', async () => {
   await db.finishWalkthrough(activeId, 'completed');
 });
 
+test('device limit: enrollment, enforcement, and the two-device cap', async () => {
+  const cp = (await db.listCheckpoints(true))[0];
+
+  // Enforcement off → open access (everything above this test relied on it).
+  await db.setSetting('require_enrolled_device', '1');
+  try {
+    // Unenrolled phone is rejected and the scan is not recorded.
+    let res = await fetch(`${base}/t/${cp.id}`);
+    assert.equal(res.status, 403);
+    assert.match(await res.text(), /not authorized/);
+
+    // Enroll phone 1 with a one-time code.
+    const code = await db.createEnrollmentCode();
+    res = await fetch(`${base}/enroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `code=${code}&device_name=Guard+phone+1`,
+    });
+    assert.equal(res.status, 200);
+    const cookie = res.headers.get('set-cookie').split(';')[0];
+    assert.match(cookie, /^device=/);
+
+    // Same code cannot be used twice.
+    res = await fetch(`${base}/enroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `code=${code}&device_name=Thief`,
+    });
+    assert.equal(res.status, 400);
+
+    // Enrolled phone can scan.
+    res = await fetch(`${base}/t/${cp.id}`, { headers: { Cookie: cookie } });
+    assert.equal(res.status, 200);
+
+    // Enroll phone 2, then a third phone is rejected by the cap of 2.
+    const code2 = await db.createEnrollmentCode();
+    res = await fetch(`${base}/enroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `code=${code2}&device_name=Guard+phone+2`,
+    });
+    assert.equal(res.status, 200);
+    const code3 = await db.createEnrollmentCode();
+    res = await fetch(`${base}/enroll`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `code=${code3}&device_name=Guard+phone+3`,
+    });
+    assert.equal(res.status, 403);
+    assert.equal(await db.countDevices(), 2);
+
+    // Removing a device revokes its access.
+    const devices = await db.listDevices();
+    const phone1 = devices.find((d) => d.name === 'Guard phone 1');
+    await db.deleteDevice(phone1.id);
+    res = await fetch(`${base}/t/${cp.id}`, { headers: { Cookie: cookie } });
+    assert.equal(res.status, 403);
+  } finally {
+    await db.setSetting('require_enrolled_device', '0');
+  }
+});
+
+test('PWA assets are served', async () => {
+  const manifest = await fetch(`${base}/manifest.webmanifest`);
+  assert.equal(manifest.status, 200);
+  const parsed = JSON.parse(await manifest.text());
+  assert.equal(parsed.display, 'standalone');
+  for (const path of ['/sw.js', '/offline.html', '/icons/icon-192.png', '/icons/icon-512.png']) {
+    const res = await fetch(`${base}${path}`);
+    assert.equal(res.status, 200, `${path} should be served`);
+  }
+});
+
 test('admin requires PIN, then works', async () => {
   let res = await fetch(`${base}/admin`);
   assert.equal(res.status, 401);

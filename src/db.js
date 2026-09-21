@@ -63,6 +63,19 @@ const SCHEMA_STATEMENTS = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS devices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL,
+    enrolled_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    last_seen TEXT
+  )`,
+  `CREATE TABLE IF NOT EXISTS enrollment_codes (
+    code TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    expires_at TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
+  )`,
   // At most one walkthrough may be in progress; concurrent starts race on the
   // check-then-insert in startWalkthrough(), so the database enforces it.
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_walkthroughs_single_active
@@ -98,6 +111,9 @@ const DEFAULT_SETTINGS = {
   ntfy_topic: '',
   webhook_url: '',
   base_url: '',
+  // Device limiting: when '1', guard pages only work on enrolled devices.
+  require_enrolled_device: '0',
+  max_devices: '2',
 };
 
 async function getSetting(key) {
@@ -314,6 +330,82 @@ async function acknowledgeAlert(id) {
   await client.execute({ sql: 'UPDATE alerts SET acknowledged = 1 WHERE id = ?', args: [id] });
 }
 
+// --- devices (two-phone access limit) --------------------------------------
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+async function listDevices() {
+  await ensureReady();
+  const rs = await client.execute('SELECT id, name, enrolled_at, last_seen FROM devices ORDER BY enrolled_at');
+  return rs.rows;
+}
+
+async function countDevices() {
+  await ensureReady();
+  const rs = await client.execute('SELECT COUNT(*) AS n FROM devices');
+  return rs.rows[0].n;
+}
+
+// Creates a one-time enrollment code valid for 30 minutes.
+async function createEnrollmentCode() {
+  await ensureReady();
+  const code = crypto.randomBytes(8).toString('hex');
+  const expires = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  await client.execute({
+    sql: 'INSERT INTO enrollment_codes (code, expires_at) VALUES (?, ?)',
+    args: [code, expires],
+  });
+  return code;
+}
+
+// Marks the code used; returns false when unknown, already used, or expired.
+// The single UPDATE ... WHERE used = 0 makes two phones racing on the same
+// code resolve to exactly one winner.
+async function consumeEnrollmentCode(code) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: 'UPDATE enrollment_codes SET used = 1 WHERE code = ? AND used = 0 AND expires_at > ?',
+    args: [code, nowIso()],
+  });
+  return rs.rowsAffected === 1;
+}
+
+// Registers a device and returns {id, token}; only the token's hash is stored,
+// the raw token lives solely in the phone's cookie.
+async function addDevice(name) {
+  await ensureReady();
+  const id = crypto.randomBytes(4).toString('hex');
+  const token = crypto.randomBytes(32).toString('hex');
+  await client.execute({
+    sql: 'INSERT INTO devices (id, name, token_hash) VALUES (?, ?, ?)',
+    args: [id, name || '', sha256(token)],
+  });
+  return { id, token };
+}
+
+async function validateDevice(id, token) {
+  await ensureReady();
+  const rs = await client.execute({ sql: 'SELECT * FROM devices WHERE id = ?', args: [id] });
+  const device = rs.rows[0];
+  if (!device || typeof token !== 'string') return null;
+  const expected = Buffer.from(device.token_hash);
+  const actual = Buffer.from(sha256(token));
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) return null;
+  return device;
+}
+
+async function touchDevice(id) {
+  await ensureReady();
+  await client.execute({ sql: 'UPDATE devices SET last_seen = ? WHERE id = ?', args: [nowIso(), id] });
+}
+
+async function deleteDevice(id) {
+  await ensureReady();
+  await client.execute({ sql: 'DELETE FROM devices WHERE id = ?', args: [id] });
+}
+
 // Escape hatch for tests/tooling.
 async function rawExecute(sql, args = []) {
   await ensureReady();
@@ -343,5 +435,13 @@ module.exports = {
   listAlerts,
   unacknowledgedAlerts,
   acknowledgeAlert,
+  listDevices,
+  countDevices,
+  createEnrollmentCode,
+  consumeEnrollmentCode,
+  addDevice,
+  validateDevice,
+  touchDevice,
+  deleteDevice,
   rawExecute,
 };

@@ -13,8 +13,13 @@ const {
   getScans,
   getMissingCheckpoints,
   finishWalkthrough,
+  getSetting,
+  countDevices,
+  consumeEnrollmentCode,
+  addDevice,
 } = require('../db');
 const { tick, closeIncomplete } = require('../scheduler');
+const { requireDevice, deviceCookieHeader } = require('../device');
 const { esc, page } = require('../html');
 
 const router = express.Router();
@@ -82,7 +87,7 @@ async function progressView(walkthrough, justScanned) {
 }
 
 // The URL written on each NFC tag: /t/<checkpoint id>
-router.get('/t/:id', wrap(async (req, res) => {
+router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
   await tick();
 
   const checkpoint = await getCheckpoint(req.params.id);
@@ -125,7 +130,7 @@ router.get('/t/:id', wrap(async (req, res) => {
   );
 }));
 
-router.post('/walkthrough/start', wrap(async (req, res) => {
+router.post('/walkthrough/start', wrap(requireDevice), wrap(async (req, res) => {
   const walkthrough = await startWalkthrough((req.body.guard_name || '').trim().slice(0, 80));
   const checkpointId = req.body.checkpoint_id;
   if (checkpointId && (await getCheckpoint(checkpointId))) {
@@ -137,7 +142,7 @@ router.post('/walkthrough/start', wrap(async (req, res) => {
 }));
 
 // Live progress page (also linked from the dashboard).
-router.get('/walk', wrap(async (req, res) => {
+router.get('/walk', wrap(requireDevice), wrap(async (req, res) => {
   await tick();
 
   const active = await getActiveWalkthrough();
@@ -162,7 +167,7 @@ router.get('/walk', wrap(async (req, res) => {
   res.send(page('Walkthrough', await progressView(active), { lang: 'ka', refreshSeconds: 15 }));
 }));
 
-router.post('/walkthrough/finish', wrap(async (req, res) => {
+router.post('/walkthrough/finish', wrap(requireDevice), wrap(async (req, res) => {
   await tick();
 
   const active = await getActiveWalkthrough();
@@ -175,6 +180,82 @@ router.post('/walkthrough/finish', wrap(async (req, res) => {
     }
   }
   res.redirect('/walk/done');
+}));
+
+// --- device enrollment (opened on the phone via the admin's one-time link) --
+
+function enrollError(title, text) {
+  return page(
+    title,
+    `<div class="card" style="text-align:center">
+       <div class="big bad">✕</div>
+       <h1>${title}</h1>
+       <p class="muted">${text}</p>
+     </div>`,
+    { lang: 'ka' }
+  );
+}
+
+router.get('/enroll/:code', wrap(async (req, res) => {
+  res.send(
+    page(
+      'Enroll device',
+      `<div class="card">
+         <h1>ტელეფონის რეგისტრაცია / Enroll this phone</h1>
+         <p class="muted">ეს ტელეფონი დაემატება ნებადართული მოწყობილობების სიაში.
+            This phone will be added to the list of allowed devices.</p>
+         <form method="post" action="/enroll">
+           <input type="hidden" name="code" value="${esc(req.params.code)}">
+           <label for="device_name">მოწყობილობის სახელი / Device name</label>
+           <input id="device_name" name="device_name" placeholder="მაგ. დაცვის ტელეფონი 1 / e.g. Guard phone 1">
+           <button class="btn full" type="submit">რეგისტრაცია / Enroll</button>
+         </form>
+       </div>`,
+      { lang: 'ka' }
+    )
+  );
+}));
+
+router.post('/enroll', wrap(async (req, res) => {
+  const max = parseInt(await getSetting('max_devices'), 10) || 2;
+  if ((await countDevices()) >= max) {
+    res.status(403).send(
+      enrollError(
+        'ლიმიტი ამოწურულია / Device limit reached',
+        `დაშვებულია მაქსიმუმ ${max} მოწყობილობა. ჯერ წაშალეთ ერთ-ერთი ადმინ პანელიდან. /
+         At most ${max} devices are allowed. Remove one in the admin panel first.`
+      )
+    );
+    return;
+  }
+  const ok = await consumeEnrollmentCode(String(req.body.code || ''));
+  if (!ok) {
+    res.status(400).send(
+      enrollError(
+        'ბმული აღარ მოქმედებს / Link no longer valid',
+        `რეგისტრაციის ბმული უკვე გამოყენებულია ან ვადაგასულია. სთხოვეთ ადმინისტრატორს ახალი. /
+         The enrollment link was already used or has expired. Ask the administrator for a new one.`
+      )
+    );
+    return;
+  }
+  const name = (req.body.device_name || '').trim().slice(0, 80);
+  const { id, token } = await addDevice(name);
+  res.setHeader('Set-Cookie', deviceCookieHeader(id, token));
+  res.send(
+    page(
+      'Enrolled',
+      `<div class="card" style="text-align:center">
+         <div class="big ok">✓</div>
+         <h1>ტელეფონი დარეგისტრირდა / Phone enrolled</h1>
+         <p class="muted">${esc(name || '')}</p>
+         <p>ახლა ამ ტელეფონით შეგიძლიათ ტეგების სკანირება. /
+            This phone can now scan the tags.</p>
+         <a class="btn full" href="/walk">დაწყება / Open the app</a>
+       </div>`,
+      { lang: 'ka' }
+    )
+  );
 }));
 
 router.get('/walk/done', (req, res) => {

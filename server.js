@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const path = require('node:path');
 const guardRoutes = require('./src/routes/guard');
 const adminRoutes = require('./src/routes/admin');
 const { startScheduler, tick } = require('./src/scheduler');
@@ -9,6 +10,7 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 

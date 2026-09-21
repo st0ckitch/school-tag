@@ -19,6 +19,9 @@ const {
   getWalkthrough,
   unacknowledgedAlerts,
   acknowledgeAlert,
+  listDevices,
+  createEnrollmentCode,
+  deleteDevice,
 } = require('../db');
 const { tick } = require('../scheduler');
 const { esc, page } = require('../html');
@@ -110,6 +113,7 @@ function nav(active) {
     ['/admin', 'Dashboard'],
     ['/admin/checkpoints', 'Checkpoints'],
     ['/admin/tags', 'Tag sheet'],
+    ['/admin/devices', 'Devices'],
     ['/admin/history', 'History'],
     ['/admin/settings', 'Settings'],
   ];
@@ -320,6 +324,82 @@ router.get('/admin/tags', wrap(requireAdmin), wrap(async (req, res) => {
        ${checkpoints.length === 0 ? '<p class="muted">No active checkpoints. Add them on the Checkpoints page first.</p>' : ''}`
     )
   );
+}));
+
+// --- devices (two-phone access limit) ---------------------------------------
+
+async function devicesPage(req, enrollUrl) {
+  const devices = await listDevices();
+  const enforcing = (await getSetting('require_enrolled_device')) === '1';
+  const max = await getSetting('max_devices');
+
+  const enrollCard = enrollUrl
+    ? `<div class="card" style="text-align:center">
+         <h2>Enrollment link (valid 30 min, one use)</h2>
+         <img src="${await QRCode.toDataURL(enrollUrl, { width: 220, margin: 1 })}" alt="Enrollment QR">
+         <div><code style="font-size:.8rem">${esc(enrollUrl)}</code></div>
+         <p class="muted">Scan this QR (or open the link) on the phone you want to allow, then press Enroll there.</p>
+       </div>`
+    : '';
+
+  return page(
+    'Devices — School Tag',
+    `${nav('/admin/devices')}
+     <h1>Allowed devices</h1>
+     <div class="sub">${devices.length} of ${esc(max)} enrolled · enforcement ${enforcing ? '<span class="pill ok">ON</span>' : '<span class="pill warn">OFF</span>'}</div>
+     ${enrollCard}
+     <div class="card">
+       <table>
+         <tr><th>Name</th><th>Enrolled</th><th>Last seen</th><th></th></tr>
+         ${devices
+           .map(
+             (d) => `<tr>
+               <td>${esc(d.name || d.id)}</td>
+               <td class="muted">${fmtTime(d.enrolled_at)}</td>
+               <td class="muted">${fmtTime(d.last_seen)}</td>
+               <td><form method="post" action="/admin/devices/${esc(d.id)}/delete" onsubmit="return confirm('Remove device ${esc(d.name || d.id)}? It will lose access immediately.')"><button class="btn small danger" type="submit">Remove</button></form></td>
+             </tr>`
+           )
+           .join('')}
+       </table>
+       ${devices.length === 0 ? '<p class="muted">No devices enrolled yet.</p>' : ''}
+       <form method="post" action="/admin/devices/enroll-code" style="margin-top:12px">
+         <button class="btn" type="submit">Generate enrollment link</button>
+       </form>
+     </div>
+     <form method="post" action="/admin/devices/settings">
+       <div class="card">
+         <h2>Enforcement</h2>
+         <label><input type="checkbox" name="require_enrolled_device" value="1" ${enforcing ? 'checked' : ''} style="width:auto;margin-right:8px"> Only enrolled devices can scan tags and run walkthroughs</label>
+         ${enforcing && devices.length === 0 ? '<p class="bad">Warning: enforcement is ON but no devices are enrolled — no phone can scan right now.</p>' : ''}
+         <label for="max_devices" style="margin-top:12px">Maximum devices</label>
+         <input id="max_devices" name="max_devices" type="number" min="1" max="20" value="${esc(max)}">
+         <button class="btn" type="submit">Save</button>
+       </div>
+     </form>`
+  );
+}
+
+router.get('/admin/devices', wrap(requireAdmin), wrap(async (req, res) => {
+  res.send(await devicesPage(req));
+}));
+
+router.post('/admin/devices/enroll-code', wrap(requireAdmin), wrap(async (req, res) => {
+  const code = await createEnrollmentCode();
+  const enrollUrl = `${await baseUrl(req)}/enroll/${code}`;
+  res.send(await devicesPage(req, enrollUrl));
+}));
+
+router.post('/admin/devices/:id/delete', wrap(requireAdmin), wrap(async (req, res) => {
+  await deleteDevice(req.params.id);
+  res.redirect('/admin/devices');
+}));
+
+router.post('/admin/devices/settings', wrap(requireAdmin), wrap(async (req, res) => {
+  await setSetting('require_enrolled_device', req.body.require_enrolled_device === '1' ? '1' : '0');
+  const max = parseInt(req.body.max_devices, 10);
+  if (Number.isInteger(max) && max >= 1 && max <= 20) await setSetting('max_devices', String(max));
+  res.redirect('/admin/devices');
 }));
 
 // --- history ----------------------------------------------------------------

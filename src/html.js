@@ -73,6 +73,13 @@ function page(title, body, opts = {}) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="School Tag">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
   ${refresh}
   <title>${esc(title)}</title>
   <style>${CSS}</style>
@@ -81,6 +88,9 @@ function page(title, body, opts = {}) {
   <div class="wrap">
     ${body}
   </div>
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(function () {});
+  </script>
 </body>
 </html>`;
 }
