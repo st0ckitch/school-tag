@@ -4,20 +4,20 @@ plugins {
 
 // Passed by the build (see .github/workflows/android-apk.yml):
 //   -PappUrl=https://your-deployed-app   -PappPackage=com.schooltag.app
-def appUrl = (findProperty('appUrl') ?: 'https://school-tag.example.com').toString().replaceAll('/+$', '')
+def appUrl = (findProperty('appUrl') ?: 'https://school-tag.example.com').toString().trim().replaceAll('/+$', '')
 def appHost = new URI(appUrl).host
-def appPackage = (findProperty('appPackage') ?: 'com.schooltag.app').toString()
+def appPackage = (findProperty('appPackage') ?: 'com.schooltag.app').toString().trim()
 
 android {
-    namespace 'com.schooltag.app'
-    compileSdk 34
+    namespace = 'com.schooltag.app'
+    compileSdk = 34
 
     defaultConfig {
-        applicationId appPackage
-        minSdk 24
-        targetSdk 34
-        versionCode (findProperty('versionCode') ?: '1').toString().toInteger()
-        versionName (findProperty('versionName') ?: '1.0').toString()
+        applicationId = appPackage
+        minSdk = 24
+        targetSdk = 34
+        versionCode = ((findProperty('versionCode') ?: '1') as String).toInteger()
+        versionName = ((findProperty('versionName') ?: '1.0') as String)
         manifestPlaceholders = [appUrl: appUrl, appHost: appHost]
         resValue "string", "app_url", appUrl
         // Digital Asset Links statement pointing back at the site.
@@ -29,19 +29,19 @@ android {
     signingConfigs {
         release {
             if (findProperty('storeFile')) {
-                storeFile file(findProperty('storeFile'))
-                storePassword findProperty('storePassword')
-                keyAlias findProperty('keyAlias')
-                keyPassword findProperty('keyPassword')
+                storeFile = file(findProperty('storeFile'))
+                storePassword = findProperty('storePassword').toString()
+                keyAlias = findProperty('keyAlias').toString()
+                keyPassword = findProperty('keyPassword').toString()
             }
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled false
+            minifyEnabled = false
             if (findProperty('storeFile')) {
-                signingConfig signingConfigs.release
+                signingConfig = signingConfigs.release
             }
         }
     }

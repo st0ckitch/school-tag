@@ -44,11 +44,16 @@ jobs:
             echo "KS_GENERATED=yes" >> "$GITHUB_ENV"
           fi
 
+      # The Android Gradle Plugin 8.5 needs Gradle 8.x — pin it instead of
+      # using whatever (possibly incompatible) version the runner ships.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
       - name: Build APK
         working-directory: android
         run: |
-          gradle wrapper --gradle-version 8.7 --no-daemon
-          ./gradlew assembleRelease --no-daemon \
+          gradle assembleRelease --no-daemon \
             -PappUrl="${{ inputs.app_url }}" \
             -PappPackage="${{ inputs.package_id }}" \
             -PversionCode="${{ github.run_number }}" \
