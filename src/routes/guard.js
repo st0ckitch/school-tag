@@ -12,13 +12,12 @@ const {
   recordScan,
   getScans,
   getMissingCheckpoints,
-  finishWalkthrough,
   getSetting,
   countDevices,
   consumeEnrollmentCode,
   addDevice,
 } = require('../db');
-const { tick, closeIncomplete } = require('../scheduler');
+const { tick, closeIncomplete, completeWalkthrough } = require('../scheduler');
 const { requireDevice, deviceCookieHeader } = require('../device');
 const { esc, page } = require('../html');
 
@@ -36,7 +35,9 @@ async function progressView(walkthrough, justScanned) {
   const missing = await getMissingCheckpoints(walkthrough.id);
   const total = scans.length + missing.length;
   const pct = total === 0 ? 100 : Math.round((scans.length / total) * 100);
-  const left = minutesLeft(walkthrough);
+  const timeInfo = walkthrough.deadline
+    ? `დარჩენილი დრო / Time left: ${minutesLeft(walkthrough)} წთ/min`
+    : 'დროის ლიმიტის გარეშე / No time limit';
 
   const scannedBanner = justScanned
     ? `<div class="card" style="border-color:#16a34a">
@@ -77,7 +78,7 @@ async function progressView(walkthrough, justScanned) {
     ${scannedBanner}
     <div class="card">
       <h1>შემოვლა მიმდინარეობს / Walkthrough in progress</h1>
-      <div class="sub">${walkthrough.guard_name ? `დამცველი / Guard: ${esc(walkthrough.guard_name)} · ` : ''}დარჩენილი დრო / Time left: ${left} წთ/min</div>
+      <div class="sub">${walkthrough.guard_name ? `დამცველი / Guard: ${esc(walkthrough.guard_name)} · ` : ''}${timeInfo}</div>
       <div class="big">${scans.length} / ${total}</div>
       <div class="progressbar"><div style="width:${pct}%"></div></div>
     </div>
@@ -175,7 +176,7 @@ router.post('/walkthrough/finish', wrap(requireDevice), wrap(async (req, res) =>
   if (active) {
     const missing = await getMissingCheckpoints(active.id);
     if (missing.length === 0) {
-      await finishWalkthrough(active.id, 'completed');
+      await completeWalkthrough(active);
     } else {
       await closeIncomplete(active, 'finished early by guard');
     }

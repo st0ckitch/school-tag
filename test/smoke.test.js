@@ -247,6 +247,59 @@ test('assetlinks.json served only when configured', async () => {
   }
 });
 
+test('duration 0 means no time limit', async () => {
+  await db.setSetting('walk_duration_minutes', '0');
+  try {
+    const w = await db.startWalkthrough('NightShift');
+    assert.equal(w.deadline, '', 'no deadline stored');
+    await tick();
+    assert.equal((await db.getWalkthrough(w.id)).status, 'in_progress', 'tick must not expire it');
+    const page = await (await fetch(`${base}/walk`)).text();
+    assert.match(page, /No time limit/);
+    for (const cp of await db.listCheckpoints(true)) await db.recordScan(w.id, cp.id);
+    await fetch(`${base}/walkthrough/finish`, { method: 'POST', redirect: 'follow' });
+    assert.equal((await db.getWalkthrough(w.id)).status, 'completed');
+  } finally {
+    await db.setSetting('walk_duration_minutes', '60');
+  }
+});
+
+test('completion email is sent via Mailchimp Transactional', async () => {
+  await db.setSetting('notify_email', 'director@example.com');
+  await db.setSetting('mailchimp_api_key', 'md-test');
+  await db.setSetting('mailchimp_from_email', 'security@example.com');
+  const captured = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('mandrillapp.com')) {
+      captured.push(JSON.parse(opts.body));
+      return new Response(JSON.stringify([{ email: 'director@example.com', status: 'sent' }]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return realFetch(url, opts);
+  };
+  try {
+    const w = await db.startWalkthrough('EmailGuard');
+    for (const cp of await db.listCheckpoints(true)) await db.recordScan(w.id, cp.id);
+    const res = await realFetch(`${base}/walkthrough/finish`, { method: 'POST', redirect: 'follow' });
+    assert.equal(res.status, 200);
+    assert.equal((await db.getWalkthrough(w.id)).status, 'completed');
+    assert.equal(captured.length, 1, 'exactly one email sent');
+    assert.equal(captured[0].key, 'md-test');
+    assert.equal(captured[0].message.to[0].email, 'director@example.com');
+    assert.equal(captured[0].message.from_email, 'security@example.com');
+    assert.match(captured[0].message.subject, /completed/);
+    assert.match(captured[0].message.text, /EmailGuard/);
+  } finally {
+    global.fetch = realFetch;
+    await db.setSetting('notify_email', '');
+    await db.setSetting('mailchimp_api_key', '');
+    await db.setSetting('mailchimp_from_email', '');
+  }
+});
+
 test('PWA assets are served', async () => {
   const manifest = await fetch(`${base}/manifest.webmanifest`);
   assert.equal(manifest.status, 200);

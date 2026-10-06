@@ -121,6 +121,10 @@ const DEFAULT_SETTINGS = {
   // Device limiting: when '1', guard pages only work on enrolled devices.
   require_enrolled_device: '0',
   max_devices: '2',
+  // Email notifications via Mailchimp Transactional (Mandrill).
+  notify_email: '',
+  mailchimp_api_key: '',
+  mailchimp_from_email: '',
 };
 
 async function getSetting(key) {
@@ -239,14 +243,17 @@ async function startWalkthrough(guardName) {
   if (active) return active;
   const id = crypto.randomBytes(6).toString('hex');
   const started = new Date();
-  const durationMin = parseInt(await getSetting('walk_duration_minutes'), 10) || 60;
-  const deadline = new Date(started.getTime() + durationMin * 60 * 1000);
+  const parsedDuration = parseInt(await getSetting('walk_duration_minutes'), 10);
+  const durationMin = Number.isNaN(parsedDuration) ? 60 : parsedDuration;
+  // 0 (or negative) means no time limit: an empty deadline is never enforced.
+  const deadline =
+    durationMin > 0 ? new Date(started.getTime() + durationMin * 60 * 1000).toISOString() : '';
   const total = (await listCheckpoints(true)).length;
   // The single-active unique index rejects a second in_progress row; DO
   // NOTHING makes a concurrent start lose quietly, then we return the winner.
   await client.execute({
     sql: 'INSERT INTO walkthroughs (id, guard_name, started_at, deadline, total_checkpoints) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
-    args: [id, guardName || '', started.toISOString(), deadline.toISOString(), total],
+    args: [id, guardName || '', started.toISOString(), deadline, total],
   });
   return (await getWalkthrough(id)) || getActiveWalkthrough();
 }

@@ -3,10 +3,33 @@
 const {
   getActiveWalkthrough,
   getMissingCheckpoints,
+  getScans,
   finishWalkthrough,
   addAlert,
 } = require('./db');
-const { sendNotification } = require('./notify');
+const { sendNotification, sendEmail } = require('./notify');
+
+function fmtLocal(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-GB', {
+    dateStyle: 'short',
+    timeStyle: 'short',
+    timeZone: process.env.TZ || 'Asia/Tbilisi',
+  });
+}
+
+// Marks a walkthrough completed and emails the configured address a summary.
+// Email failures are logged but never break the guard's flow.
+async function completeWalkthrough(walkthrough) {
+  await finishWalkthrough(walkthrough.id, 'completed');
+  const scanned = (await getScans(walkthrough.id)).length;
+  const message =
+    `Walkthrough completed — all checkpoints scanned (${scanned}/${walkthrough.total_checkpoints}).\n` +
+    (walkthrough.guard_name ? `Guard: ${walkthrough.guard_name}\n` : '') +
+    `Started: ${fmtLocal(walkthrough.started_at)}\n` +
+    `Finished: ${fmtLocal(new Date().toISOString())}`;
+  await sendEmail('✅ School security: walkthrough completed', message);
+}
 
 // Closes a walkthrough that still has unscanned checkpoints and raises the
 // alert. Shared by the scheduler (deadline passed) and the "finish early"
@@ -23,6 +46,7 @@ async function closeIncomplete(walkthrough, reason) {
 
   await addAlert(walkthrough.id, 'missed_checkpoints', message);
   await sendNotification('⚠️ School security: checkpoints missed', message);
+  await sendEmail('⚠️ School security: checkpoints missed', message);
   return missing;
 }
 
@@ -31,12 +55,15 @@ async function closeIncomplete(walkthrough, reason) {
 async function tick() {
   const active = await getActiveWalkthrough();
   if (!active) return;
+  // An empty deadline means "no time limit" — the walkthrough stays open
+  // until the guard presses Finish.
+  if (!active.deadline) return;
   if (new Date(active.deadline).getTime() > Date.now()) return;
 
   const missing = await getMissingCheckpoints(active.id);
   if (missing.length === 0) {
     // Everything was scanned but nobody pressed finish — count it as done.
-    await finishWalkthrough(active.id, 'completed');
+    await completeWalkthrough(active);
     return;
   }
   await closeIncomplete(active, 'time expired');
@@ -57,4 +84,4 @@ function stopScheduler() {
   timer = null;
 }
 
-module.exports = { startScheduler, stopScheduler, tick, closeIncomplete };
+module.exports = { startScheduler, stopScheduler, tick, closeIncomplete, completeWalkthrough };

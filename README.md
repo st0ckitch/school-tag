@@ -63,12 +63,20 @@ Admin → **Settings**:
 - **Time limit** — how long one walkthrough may take (default 60 min). If not
   every tag is scanned within this time, the walkthrough is closed as
   *incomplete* and an alert is sent listing exactly which checkpoints were missed.
+  Set it to **0** for no time limit: the walkthrough then stays open until the
+  guard presses Finish (alerts still fire if they finish with tags missing).
 - **ntfy topic** — the simplest way to get push notifications: install the free
   **ntfy** app on the phones that should receive alerts (director, head of
   security, …), subscribe them to a hard-to-guess topic name like
   `myschool-security-x7k2`, and enter the same topic here.
 - **Webhook URL** — optionally POST alerts as JSON to anything else
   (Slack, Telegram bot relay, an in-house system).
+- **Email notifications (Mailchimp)** — a summary email when a walkthrough is
+  completed and an alert email when checkpoints are missed, sent to the address
+  you enter. Requires a **Mailchimp Transactional** (Mandrill) API key — create
+  one in your Mailchimp account under Automations → Transactional Email; the
+  From address must be on a domain you verified there. Use the "Send test
+  email" button on the Settings page to check the key.
 
 ### 4. The guard's daily flow
 

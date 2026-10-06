@@ -27,6 +27,48 @@ async function getVapidKeys() {
   }
 }
 
+// One-off notification email via the Mailchimp Transactional (Mandrill) API.
+// Configured on the admin Settings page: recipient, API key, from address.
+async function sendEmail(subject, text) {
+  const to = ((await getSetting('notify_email')) || '').trim();
+  const apiKey = ((await getSetting('mailchimp_api_key')) || '').trim();
+  const from = ((await getSetting('mailchimp_from_email')) || '').trim();
+  if (!to || !apiKey || !from) return { ok: false, error: 'email not configured' };
+
+  try {
+    const res = await fetch('https://mandrillapp.com/api/1.0/messages/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: apiKey,
+        message: {
+          from_email: from,
+          from_name: 'School Tag',
+          to: [{ email: to, type: 'to' }],
+          subject,
+          text,
+        },
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok || (body && body.status === 'error')) {
+      const reason = (body && (body.message || body.name)) || `HTTP ${res.status}`;
+      console.error('[notify] mailchimp email failed:', reason);
+      return { ok: false, error: reason };
+    }
+    const first = Array.isArray(body) ? body[0] : null;
+    if (first && first.status === 'rejected') {
+      console.error('[notify] mailchimp email rejected:', first.reject_reason);
+      return { ok: false, error: `rejected: ${first.reject_reason}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error('[notify] mailchimp email failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 // Native push to every subscribed phone (installed app / APK). Dead
 // subscriptions (uninstalled app, revoked permission) are pruned.
 async function sendWebPush(title, message) {
@@ -111,4 +153,4 @@ async function sendNotification(title, message, priority = 'high') {
   return results;
 }
 
-module.exports = { sendNotification, getVapidKeys };
+module.exports = { sendNotification, sendEmail, getVapidKeys };

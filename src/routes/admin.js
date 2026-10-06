@@ -24,6 +24,7 @@ const {
   deleteDevice,
 } = require('../db');
 const { tick } = require('../scheduler');
+const { sendEmail } = require('../notify');
 const { esc, page } = require('../html');
 
 const router = express.Router();
@@ -180,11 +181,13 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
     const scannedIds = new Set(scans.map((s) => s.checkpoint_id));
     const total = checkpoints.length;
     const pct = total === 0 ? 100 : Math.round((scans.length / total) * 100);
-    const minsLeft = Math.max(0, Math.round((new Date(active.deadline).getTime() - Date.now()) / 60000));
+    const timeInfo = active.deadline
+      ? `${Math.max(0, Math.round((new Date(active.deadline).getTime() - Date.now()) / 60000))} min left`
+      : 'no time limit';
     liveCard = `
       <div class="card">
         <h2>Live walkthrough ${STATUS_PILL.in_progress}</h2>
-        <div class="sub">Guard: ${esc(active.guard_name || '—')} · Started ${fmtTime(active.started_at)} · ${minsLeft} min left</div>
+        <div class="sub">Guard: ${esc(active.guard_name || '—')} · Started ${fmtTime(active.started_at)} · ${timeInfo}</div>
         <div class="big">${scans.length} / ${total}</div>
         <div class="progressbar"><div style="width:${pct}%"></div></div>
         <ul class="plain">
@@ -495,6 +498,10 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const adminPin = await getSetting('admin_pin');
   const androidPackage = (await getSetting('android_package')) || '';
   const androidSha256 = (await getSetting('android_sha256')) || '';
+  const notifyEmail = (await getSetting('notify_email')) || '';
+  const mailchimpApiKey = (await getSetting('mailchimp_api_key')) || '';
+  const mailchimpFromEmail = (await getSetting('mailchimp_from_email')) || '';
+  const emailTest = typeof req.query.email_test === 'string' ? req.query.email_test : '';
   res.send(
     adminPage(
       'Settings — School Tag',
@@ -503,8 +510,8 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
        <form method="post" action="/admin/settings">
          <div class="card">
            <h2>Walkthrough</h2>
-           <label for="walk_duration_minutes">Time limit for one walkthrough (minutes). If the guard has not scanned every tag within this time, an alert is sent.</label>
-           <input id="walk_duration_minutes" name="walk_duration_minutes" type="number" min="5" max="720" value="${esc(walkDurationMinutes)}">
+           <label for="walk_duration_minutes">Time limit for one walkthrough (minutes). If the guard has not scanned every tag within this time, an alert is sent. <b>Set 0 for no time limit</b> — the walkthrough then stays open until the guard presses Finish.</label>
+           <input id="walk_duration_minutes" name="walk_duration_minutes" type="number" min="0" max="720" value="${esc(walkDurationMinutes)}">
          </div>
          <div class="card">
            <h2>Alert delivery</h2>
@@ -512,6 +519,17 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <input id="ntfy_topic" name="ntfy_topic" value="${esc(ntfyTopic)}" placeholder="myschool-security-x7k2">
            <label for="webhook_url">Webhook URL (optional) — alerts are also POSTed here as JSON</label>
            <input id="webhook_url" name="webhook_url" value="${esc(webhookUrl)}" placeholder="https://...">
+         </div>
+         <div class="card">
+           <h2>Email notifications (Mailchimp)</h2>
+           <p class="muted">A summary email is sent when a walkthrough is <b>completed</b>, and an alert email when checkpoints are <b>missed</b>. Requires a <b>Mailchimp Transactional</b> (Mandrill) API key — regular Mailchimp campaign keys cannot send single emails.</p>
+           ${emailTest ? (emailTest === 'ok' ? '<p class="ok">✓ Test email sent — check the inbox.</p>' : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
+           <label for="notify_email">Send notifications to this email</label>
+           <input id="notify_email" name="notify_email" type="email" value="${esc(notifyEmail)}" placeholder="director@myschool.ge">
+           <label for="mailchimp_api_key">Mailchimp Transactional API key</label>
+           <input id="mailchimp_api_key" name="mailchimp_api_key" type="password" value="${esc(mailchimpApiKey)}" placeholder="md-...">
+           <label for="mailchimp_from_email">From address (must be on a domain verified in Mailchimp Transactional)</label>
+           <input id="mailchimp_from_email" name="mailchimp_from_email" type="email" value="${esc(mailchimpFromEmail)}" placeholder="security@myschool.ge">
          </div>
          <div class="card">
            <h2>System</h2>
@@ -529,13 +547,24 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <input id="android_sha256" name="android_sha256" value="${esc(androidSha256)}" placeholder="AA:BB:CC:...">
          </div>
          <button class="btn" type="submit">Save</button>
+       </form>
+       <form method="post" action="/admin/settings/test-email" style="margin-top:12px">
+         <button class="btn secondary" type="submit">Send test email (uses the saved values above)</button>
        </form>`
     )
   );
 }));
 
+router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, res) => {
+  const result = await sendEmail(
+    'School Tag: test email',
+    'This is a test email from your School Tag admin settings. If you can read this, email notifications are working.'
+  );
+  res.redirect('/admin/settings?email_test=' + encodeURIComponent(result.ok ? 'ok' : result.error || 'failed'));
+}));
+
 router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
-  for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin', 'android_package', 'android_sha256']) {
+  for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin', 'android_package', 'android_sha256', 'notify_email', 'mailchimp_api_key', 'mailchimp_from_email']) {
     if (req.body[key] !== undefined) await setSetting(key, String(req.body[key]).trim());
   }
   res.redirect('/admin/settings');
