@@ -278,9 +278,9 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
        </div>
        <div class="card">
          <h2>Bulk restore</h2>
-         <p class="muted">One checkpoint per line: <code>tagcode, Name, Location</code> (location optional).
-            Get each chip's code and name from the phone's browser history (<code>chrome://history</code>, search
-            "school-tag" — entries look like "✓ Main entrance" with the /t/code in the URL) or from Railway's HTTP logs.</p>
+         <p class="muted">Paste <b>anything containing the tag links</b> — raw Railway HTTP logs, browser
+            history, a list of URLs — every <code>/t/code</code> found is restored automatically (named
+            "Tag code", rename later). Or use structured lines: <code>tagcode, Name, Location</code>.</p>
          <form method="post" action="/admin/checkpoints/bulk">
            <textarea name="bulk" rows="10" style="width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:12px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:0.95rem" placeholder="63f91d85, Main entrance, Ground floor&#10;ece2c3ac, Gym&#10;dfbedd8d, Library, 1st floor"></textarea>
            <button class="btn" type="submit" style="margin-top:10px">Restore all</button>
@@ -332,27 +332,46 @@ router.post('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
 }));
 
 router.post('/admin/checkpoints/bulk', wrap(requireAdmin), wrap(async (req, res) => {
-  const lines = String(req.body.bulk || '').split('\n').map((l) => l.trim()).filter(Boolean);
-  let added = 0;
-  let duplicates = 0;
+  const raw = String(req.body.bulk || '');
+  // Codes to restore, in order of first appearance: code -> {name, location}
+  const wanted = new Map();
   const invalid = [];
+
+  // 1) Structured lines: "code, Name, Location" (lines without a tag URL).
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
   for (let i = 0; i < lines.length; i++) {
-    const parts = lines[i].split(',').map((x) => x.trim());
+    const line = lines[i];
+    if (/\/t\//.test(line)) continue; // raw-log/URL lines handled below
+    const parts = line.split(',').map((x) => x.trim());
     const code = (parts[0] || '').toLowerCase();
     const name = (parts[1] || '').slice(0, 120);
     const location = (parts[2] || '').slice(0, 200);
-    if (!/^[0-9a-f]{6,16}$/.test(code) || !name) {
+    if (/^[0-9a-f]{6,16}$/.test(code) && name) {
+      wanted.set(code, { name, location });
+    } else {
       invalid.push(i + 1);
-      continue;
     }
-    const created = await addCheckpoint(name, location, code);
+  }
+
+  // 2) Any text containing tag links (raw Railway logs, browser history,
+  //    pasted URLs): auto-extract every /t/<code> occurrence.
+  for (const m of raw.matchAll(/\/t\/([0-9a-fA-F]{6,16})\b/g)) {
+    const code = m[1].toLowerCase();
+    if (!wanted.has(code)) wanted.set(code, { name: `Tag ${code}`, location: '' });
+  }
+
+  let added = 0;
+  let duplicates = 0;
+  for (const [code, info] of wanted) {
+    const created = await addCheckpoint(info.name, info.location, code);
     if (created) added++;
     else duplicates++;
   }
+
   const summary = `Restored ${added} checkpoint(s)` +
     (duplicates ? `, skipped ${duplicates} already-existing` : '') +
-    (invalid.length ? `; invalid lines: ${invalid.join(', ')} (format: code, Name, Location)` : '') + '.';
-  res.redirect('/admin/checkpoints?' + (invalid.length ? 'err=' : 'msg=') + encodeURIComponent(summary));
+    (invalid.length ? `; unparsed lines: ${invalid.join(', ')} (use: code, Name, Location)` : '') + '.';
+  res.redirect('/admin/checkpoints?' + (added || !invalid.length ? 'msg=' : 'err=') + encodeURIComponent(summary));
 }));
 
 router.post('/admin/checkpoints/:id/update', wrap(requireAdmin), wrap(async (req, res) => {

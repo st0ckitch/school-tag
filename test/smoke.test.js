@@ -338,6 +338,26 @@ test('bulk restore creates checkpoints from pasted lines', async () => {
   assert.ok((await db.getCheckpoint('bbbb2222')), 'second restored');
   // chip URL immediately works
   assert.equal((await fetch(`${base}/t/aaaa1111`)).status, 200);
+  // raw log / URL paste: codes auto-extracted from arbitrary text
+  const rawDump = [
+    'Oct 06 13:01:22 GET /t/cccc3333 200 12ms "Mozilla/5.0..."',
+    'https://school-tag-production.up.railway.app/t/dddd4444',
+    'GET /walk 200 — no code here',
+    'GET /t/cccc3333 200 (duplicate request)',
+  ].join('\n');
+  res = await fetch(`${base}/admin/checkpoints/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    body: 'bulk=' + encodeURIComponent(rawDump),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok(await db.getCheckpoint('cccc3333'), 'code from raw log line restored');
+  assert.equal((await db.getCheckpoint('cccc3333')).name, 'Tag cccc3333');
+  assert.ok(await db.getCheckpoint('dddd4444'), 'code from pasted URL restored');
+  await db.deleteCheckpoint('cccc3333');
+  await db.deleteCheckpoint('dddd4444');
+
   // inline rename
   res = await fetch(`${base}/admin/checkpoints/bbbb2222/update`, {
     method: 'POST',
