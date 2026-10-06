@@ -347,7 +347,8 @@ router.post('/admin/checkpoints/bulk', wrap(requireAdmin), wrap(async (req, res)
     const name = (parts[1] || '').slice(0, 120);
     const location = (parts[2] || '').slice(0, 200);
     if (/^[0-9a-f]{6,16}$/.test(code) && name) {
-      wanted.set(code, { name, location });
+      // first occurrence wins; repeated codes in one paste are collapsed
+      if (!wanted.has(code)) wanted.set(code, { name, location });
     } else {
       invalid.push(i + 1);
     }
