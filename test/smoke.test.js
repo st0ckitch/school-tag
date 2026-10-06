@@ -300,6 +300,21 @@ test('completion email is sent via Mailchimp Transactional', async () => {
   }
 });
 
+test('a Marketing-type Mailchimp key is rejected with guidance', async () => {
+  const { sendEmail } = require('../src/notify');
+  await db.setSetting('notify_email', 'director@example.com');
+  await db.setSetting('mailchimp_api_key', 'fake-marketing-style-key-us1');
+  try {
+    const result = await sendEmail('x', 'y');
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Marketing key/);
+    assert.match(result.error, /md-/);
+  } finally {
+    await db.setSetting('notify_email', '');
+    await db.setSetting('mailchimp_api_key', '');
+  }
+});
+
 test('PWA assets are served', async () => {
   const manifest = await fetch(`${base}/manifest.webmanifest`);
   assert.equal(manifest.status, 200);

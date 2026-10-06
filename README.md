@@ -75,8 +75,12 @@ Admin → **Settings**:
   completed and an alert email when checkpoints are missed, sent to the address
   you enter. Requires a **Mailchimp Transactional** (Mandrill) API key — create
   one in your Mailchimp account under Automations → Transactional Email; the
-  From address must be on a domain you verified there. Use the "Send test
-  email" button on the Settings page to check the key.
+  From address must be on a domain you verified there. A regular Mailchimp
+  Marketing key (…-usN) cannot send these emails and is rejected with an
+  explanation. **Alternative: plain SMTP** — leave the Mailchimp key empty and
+  fill the SMTP fields instead (for Gmail: 2-step verification on, then
+  Google Account → Security → App passwords). Use the "Send test email"
+  button on the Settings page to check either setup.
 
 ### 4. The guard's daily flow
 

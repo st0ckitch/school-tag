@@ -121,10 +121,15 @@ const DEFAULT_SETTINGS = {
   // Device limiting: when '1', guard pages only work on enrolled devices.
   require_enrolled_device: '0',
   max_devices: '2',
-  // Email notifications via Mailchimp Transactional (Mandrill).
+  // Email notifications via Mailchimp Transactional (Mandrill) or SMTP.
   notify_email: '',
   mailchimp_api_key: '',
   mailchimp_from_email: '',
+  smtp_host: '',
+  smtp_port: '',
+  smtp_user: '',
+  smtp_pass: '',
+  smtp_from: '',
 };
 
 async function getSetting(key) {

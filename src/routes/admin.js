@@ -501,6 +501,11 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const notifyEmail = (await getSetting('notify_email')) || '';
   const mailchimpApiKey = (await getSetting('mailchimp_api_key')) || '';
   const mailchimpFromEmail = (await getSetting('mailchimp_from_email')) || '';
+  const smtpHost = (await getSetting('smtp_host')) || '';
+  const smtpPort = (await getSetting('smtp_port')) || '';
+  const smtpUser = (await getSetting('smtp_user')) || '';
+  const smtpPass = (await getSetting('smtp_pass')) || '';
+  const smtpFrom = (await getSetting('smtp_from')) || '';
   const emailTest = typeof req.query.email_test === 'string' ? req.query.email_test : '';
   res.send(
     adminPage(
@@ -530,6 +535,18 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <input id="mailchimp_api_key" name="mailchimp_api_key" type="password" value="${esc(mailchimpApiKey)}" placeholder="md-...">
            <label for="mailchimp_from_email">From address (must be on a domain verified in Mailchimp Transactional)</label>
            <input id="mailchimp_from_email" name="mailchimp_from_email" type="email" value="${esc(mailchimpFromEmail)}" placeholder="security@myschool.ge">
+           <h2 style="margin-top:16px">…or plain SMTP (free, e.g. Gmail)</h2>
+           <p class="muted">Leave the Mailchimp key empty and fill these instead. For Gmail: enable 2-step verification, create an <b>App password</b> (Google Account → Security → App passwords), and use it here — not your normal password.</p>
+           <div class="row">
+             <div><label for="smtp_host">SMTP host</label><input id="smtp_host" name="smtp_host" value="${esc(smtpHost)}" placeholder="smtp.gmail.com"></div>
+             <div><label for="smtp_port">Port</label><input id="smtp_port" name="smtp_port" type="number" value="${esc(smtpPort)}" placeholder="465"></div>
+           </div>
+           <label for="smtp_user">SMTP user (your email address)</label>
+           <input id="smtp_user" name="smtp_user" type="email" value="${esc(smtpUser)}" placeholder="school.security@gmail.com">
+           <label for="smtp_pass">SMTP password / app password</label>
+           <input id="smtp_pass" name="smtp_pass" type="password" value="${esc(smtpPass)}">
+           <label for="smtp_from">From address (optional, defaults to the SMTP user)</label>
+           <input id="smtp_from" name="smtp_from" type="email" value="${esc(smtpFrom)}">
          </div>
          <div class="card">
            <h2>System</h2>
@@ -564,7 +581,7 @@ router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, r
 }));
 
 router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
-  for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin', 'android_package', 'android_sha256', 'notify_email', 'mailchimp_api_key', 'mailchimp_from_email']) {
+  for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin', 'android_package', 'android_sha256', 'notify_email', 'mailchimp_api_key', 'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from']) {
     if (req.body[key] !== undefined) await setSetting(key, String(req.body[key]).trim());
   }
   res.redirect('/admin/settings');

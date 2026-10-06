@@ -27,13 +27,36 @@ async function getVapidKeys() {
   }
 }
 
-// One-off notification email via the Mailchimp Transactional (Mandrill) API.
-// Configured on the admin Settings page: recipient, API key, from address.
+// One-off notification email, configured on the admin Settings page.
+// Two interchangeable channels:
+//  - Mailchimp Transactional (Mandrill): needs an 'md-...' API key. A regular
+//    Mailchimp Marketing key (hex + '-usN') cannot send single emails, so it
+//    is rejected with an explanation instead of failing mysteriously.
+//  - SMTP (e.g. Gmail with an App Password): free, works with any mailbox.
 async function sendEmail(subject, text) {
   const to = ((await getSetting('notify_email')) || '').trim();
+  if (!to) return { ok: false, error: 'recipient email not set' };
+
   const apiKey = ((await getSetting('mailchimp_api_key')) || '').trim();
+  const smtpUser = ((await getSetting('smtp_user')) || '').trim();
+  const smtpPass = ((await getSetting('smtp_pass')) || '').trim();
+
+  if (apiKey.startsWith('md-')) return sendViaMandrill(to, apiKey, subject, text);
+  if (smtpUser && smtpPass) return sendViaSmtp(to, smtpUser, smtpPass, subject, text);
+  if (apiKey) {
+    return {
+      ok: false,
+      error:
+        "the saved Mailchimp key is a Marketing key (…-usN) which cannot send single emails. " +
+        "Use a Mailchimp Transactional key (starts with 'md-') or fill in the SMTP fields instead.",
+    };
+  }
+  return { ok: false, error: 'email not configured' };
+}
+
+async function sendViaMandrill(to, apiKey, subject, text) {
   const from = ((await getSetting('mailchimp_from_email')) || '').trim();
-  if (!to || !apiKey || !from) return { ok: false, error: 'email not configured' };
+  if (!from) return { ok: false, error: 'from address not set' };
 
   try {
     const res = await fetch('https://mandrillapp.com/api/1.0/messages/send', {
@@ -65,6 +88,29 @@ async function sendEmail(subject, text) {
     return { ok: true };
   } catch (err) {
     console.error('[notify] mailchimp email failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+async function sendViaSmtp(to, user, pass, subject, text) {
+  const host = ((await getSetting('smtp_host')) || '').trim() || 'smtp.gmail.com';
+  const port = parseInt(await getSetting('smtp_port'), 10) || 465;
+  const from = ((await getSetting('smtp_from')) || '').trim() || user;
+  try {
+    const nodemailer = require('nodemailer');
+    const transport = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 12000,
+    });
+    await transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text });
+    return { ok: true };
+  } catch (err) {
+    console.error('[notify] smtp email failed:', err.message);
     return { ok: false, error: err.message };
   }
 }
