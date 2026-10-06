@@ -264,11 +264,14 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
        <h1>Checkpoints</h1>
        <div class="card">
          <h2>Add checkpoint</h2>
+         ${typeof req.query.err === 'string' && req.query.err ? `<p class="bad">✕ ${esc(req.query.err)}</p>` : ''}
          <form method="post" action="/admin/checkpoints">
            <div class="row">
              <div><label for="name">Name</label><input id="name" name="name" required placeholder="e.g. Main entrance"></div>
              <div><label for="location">Location (optional)</label><input id="location" name="location" placeholder="e.g. Ground floor, west wing"></div>
            </div>
+           <label for="tag_code">Tag code (optional — ONLY when restoring an already-written chip; the 8-character code from its URL, e.g. <code>63f91d85</code>)</label>
+           <input id="tag_code" name="tag_code" pattern="[0-9a-fA-F]{6,16}" placeholder="leave empty for a new tag">
            <button class="btn" type="submit">Add</button>
          </form>
        </div>
@@ -299,7 +302,16 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
 router.post('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const name = (req.body.name || '').trim().slice(0, 120);
   const location = (req.body.location || '').trim().slice(0, 200);
-  if (name) await addCheckpoint(name, location);
+  const tagCodeRaw = (req.body.tag_code || '').trim().toLowerCase();
+  if (tagCodeRaw && !/^[0-9a-f]{6,16}$/.test(tagCodeRaw)) {
+    return res.redirect('/admin/checkpoints?err=' + encodeURIComponent('Tag code must be 6-16 characters of 0-9 and a-f.'));
+  }
+  if (name) {
+    const created = await addCheckpoint(name, location, tagCodeRaw || undefined);
+    if (!created) {
+      return res.redirect('/admin/checkpoints?err=' + encodeURIComponent(`A checkpoint with tag code ${tagCodeRaw} already exists.`));
+    }
+  }
   res.redirect('/admin/checkpoints');
 }));
 

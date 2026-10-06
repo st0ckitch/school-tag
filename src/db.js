@@ -201,15 +201,18 @@ async function getCheckpoint(id) {
   return rs.rows[0];
 }
 
-async function addCheckpoint(name, location) {
+// customId lets a checkpoint be restored under the exact code already
+// written inside a physical NFC chip; returns null if that code is taken.
+async function addCheckpoint(name, location, customId) {
   await ensureReady();
-  const id = newCheckpointId();
+  const id = customId ? String(customId).toLowerCase() : newCheckpointId();
   const maxRs = await client.execute('SELECT COALESCE(MAX(sort_order), 0) AS m FROM checkpoints');
   const max = maxRs.rows[0].m;
-  await client.execute({
-    sql: 'INSERT INTO checkpoints (id, name, location, sort_order) VALUES (?, ?, ?, ?)',
+  const rs = await client.execute({
+    sql: 'INSERT INTO checkpoints (id, name, location, sort_order) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
     args: [id, name, location || '', max + 1],
   });
+  if (rs.rowsAffected === 0) return null;
   return getCheckpoint(id);
 }
 

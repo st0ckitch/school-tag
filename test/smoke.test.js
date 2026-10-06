@@ -300,6 +300,16 @@ test('completion email is sent via Mailchimp Transactional', async () => {
   }
 });
 
+test('checkpoints can be restored under a chosen tag code', async () => {
+  const restored = await db.addCheckpoint('Restored entrance', 'Ground floor', 'abcd1234');
+  assert.equal(restored.id, 'abcd1234');
+  const res = await fetch(`${base}/t/abcd1234`);
+  assert.equal(res.status, 200, 'chip URL with restored code works');
+  const dup = await db.addCheckpoint('Duplicate', '', 'abcd1234');
+  assert.equal(dup, null, 'duplicate tag code is rejected');
+  await db.deleteCheckpoint('abcd1234');
+});
+
 test('Brevo channel sends over HTTPS', async () => {
   const { sendEmail } = require('../src/notify');
   await db.setSetting('notify_email', 'director@example.com');
