@@ -300,6 +300,38 @@ test('completion email is sent via Mailchimp Transactional', async () => {
   }
 });
 
+test('Brevo channel sends over HTTPS', async () => {
+  const { sendEmail } = require('../src/notify');
+  await db.setSetting('notify_email', 'director@example.com');
+  await db.setSetting('brevo_api_key', 'xkeysib-test');
+  await db.setSetting('brevo_from_email', 'security@example.com');
+  const captured = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('api.brevo.com')) {
+      captured.push({ headers: opts.headers, body: JSON.parse(opts.body) });
+      return new Response(JSON.stringify({ messageId: 'test-123' }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return realFetch(url, opts);
+  };
+  try {
+    const result = await sendEmail('Subject here', 'Body here');
+    assert.equal(result.ok, true);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].headers['api-key'], 'xkeysib-test');
+    assert.equal(captured[0].body.to[0].email, 'director@example.com');
+    assert.equal(captured[0].body.sender.email, 'security@example.com');
+  } finally {
+    global.fetch = realFetch;
+    await db.setSetting('notify_email', '');
+    await db.setSetting('brevo_api_key', '');
+    await db.setSetting('brevo_from_email', '');
+  }
+});
+
 test('a Marketing-type Mailchimp key is rejected with guidance', async () => {
   const { sendEmail } = require('../src/notify');
   await db.setSetting('notify_email', 'director@example.com');

@@ -36,6 +36,7 @@ async function getVapidKeys() {
 async function sendEmail(subject, text) {
   const to = ((await getSetting('notify_email')) || '').trim();
   const apiKey = ((await getSetting('mailchimp_api_key')) || '').trim();
+  const brevoKey = ((await getSetting('brevo_api_key')) || '').trim();
   const smtpUser = ((await getSetting('smtp_user')) || '').trim();
   const smtpPass = ((await getSetting('smtp_pass')) || '').trim();
 
@@ -44,6 +45,7 @@ async function sendEmail(subject, text) {
     subject,
     to: to || '(empty)',
     mailchimp_key: apiKey ? (apiKey.startsWith('md-') ? 'transactional' : 'marketing-type (unusable)') : '(empty)',
+    brevo_key: brevoKey ? `set (${brevoKey.length} chars)` : '(empty)',
     smtp_user: smtpUser || '(empty)',
     smtp_pass: smtpPass ? `set (${smtpPass.length} chars)` : '(empty)',
   });
@@ -56,6 +58,10 @@ async function sendEmail(subject, text) {
   if (apiKey.startsWith('md-')) {
     console.log('[email] channel: Mailchimp Transactional');
     return sendViaMandrill(to, apiKey, subject, text);
+  }
+  if (brevoKey) {
+    console.log('[email] channel: Brevo (HTTPS)');
+    return sendViaBrevo(to, brevoKey, subject, text);
   }
   if (smtpUser && smtpPass) {
     console.log('[email] channel: SMTP');
@@ -109,6 +115,36 @@ async function sendViaMandrill(to, apiKey, subject, text) {
   } catch (err) {
     console.error('[notify] mailchimp email failed:', err.message);
     return { ok: false, error: err.message };
+  }
+}
+
+// Brevo (brevo.com) HTTPS email API — works where hosts block SMTP ports.
+async function sendViaBrevo(to, apiKey, subject, text) {
+  const from = ((await getSetting('brevo_from_email')) || '').trim();
+  if (!from) return { ok: false, error: 'Brevo from address not set' };
+  try {
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        sender: { name: 'School Tag', email: from },
+        to: [{ email: to }],
+        subject,
+        textContent: text,
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const reason = (body && body.message) || `HTTP ${res.status}`;
+      console.error('[email] Brevo send FAILED:', { status: res.status, body });
+      return { ok: false, error: `Brevo: ${reason}` };
+    }
+    console.log('[email] Brevo sent OK:', body && body.messageId);
+    return { ok: true };
+  } catch (err) {
+    console.error('[email] Brevo send FAILED:', err.message);
+    return { ok: false, error: `Brevo: ${err.message}` };
   }
 }
 

@@ -506,6 +506,8 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const smtpUser = (await getSetting('smtp_user')) || '';
   const smtpPass = (await getSetting('smtp_pass')) || '';
   const smtpFrom = (await getSetting('smtp_from')) || '';
+  const brevoApiKey = (await getSetting('brevo_api_key')) || '';
+  const brevoFromEmail = (await getSetting('brevo_from_email')) || '';
   const emailTest = typeof req.query.email_test === 'string' ? req.query.email_test : '';
   res.send(
     adminPage(
@@ -535,7 +537,13 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <input id="mailchimp_api_key" name="mailchimp_api_key" type="password" value="${esc(mailchimpApiKey)}" placeholder="md-...">
            <label for="mailchimp_from_email">From address (must be on a domain verified in Mailchimp Transactional)</label>
            <input id="mailchimp_from_email" name="mailchimp_from_email" type="email" value="${esc(mailchimpFromEmail)}" placeholder="security@myschool.ge">
-           <h2 style="margin-top:16px">…or plain SMTP (free, e.g. Gmail)</h2>
+           <h2 style="margin-top:16px">…or Brevo — recommended on Railway (free, 300 emails/day)</h2>
+           <p class="muted">Railway blocks SMTP ports, so Gmail SMTP times out there — Brevo sends over HTTPS instead. Create a free account at <b>brevo.com</b>, then: profile menu → <b>SMTP &amp; API → API Keys → Generate a new API key</b>. The From address below must be a verified sender in Brevo (your signup email works out of the box; others can be added under Senders).</p>
+           <label for="brevo_api_key">Brevo API key</label>
+           <input id="brevo_api_key" name="brevo_api_key" type="password" value="${esc(brevoApiKey)}" placeholder="xkeysib-...">
+           <label for="brevo_from_email">From address (a verified sender in Brevo)</label>
+           <input id="brevo_from_email" name="brevo_from_email" type="email" value="${esc(brevoFromEmail)}">
+           <h2 style="margin-top:16px">…or plain SMTP (e.g. Gmail — does not work on Railway)</h2>
            <p class="muted">Leave the Mailchimp key empty and fill these instead. For Gmail: enable 2-step verification, create an <b>App password</b> (Google Account → Security → App passwords), and use it here — not your normal password.</p>
            <div class="row">
              <div><label for="smtp_host">SMTP host</label><input id="smtp_host" name="smtp_host" value="${esc(smtpHost)}" placeholder="smtp.gmail.com"></div>
@@ -575,7 +583,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
 const SETTINGS_KEYS = [
   'walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin',
   'android_package', 'android_sha256', 'notify_email', 'mailchimp_api_key',
-  'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from',
+  'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from', 'brevo_api_key', 'brevo_from_email',
 ];
 
 async function saveSettings(req) {

@@ -79,8 +79,11 @@ Admin → **Settings**:
   Marketing key (…-usN) cannot send these emails and is rejected with an
   explanation. **Alternative: plain SMTP** — leave the Mailchimp key empty and
   fill the SMTP fields instead (for Gmail: 2-step verification on, then
-  Google Account → Security → App passwords). Use the "Send test email"
-  button on the Settings page to check either setup.
+  Google Account → Security → App passwords). **Note: Railway blocks SMTP
+  ports**, so on Railway use the **Brevo** option instead — a free
+  brevo.com account (300 emails/day) sending over HTTPS; create an API key
+  under SMTP & API and use a verified sender as the From address. Use the
+  "Save & send test email" button on the Settings page to check any setup.
 
 ### 4. The guard's daily flow
 

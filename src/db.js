@@ -130,6 +130,8 @@ const DEFAULT_SETTINGS = {
   smtp_user: '',
   smtp_pass: '',
   smtp_from: '',
+  brevo_api_key: '',
+  brevo_from_email: '',
 };
 
 async function getSetting(key) {
