@@ -60,6 +60,15 @@ async function sendEmail(subject, text) {
     return sendViaMandrill(to, apiKey, subject, text);
   }
   if (brevoKey) {
+    if (brevoKey.startsWith('xsmtpsib-')) {
+      console.error('[email] aborted: Brevo SMTP key supplied instead of API key');
+      return {
+        ok: false,
+        error:
+          "this is a Brevo SMTP key (xsmtpsib-…), which only works over blocked SMTP ports. " +
+          "Use an API key instead: Brevo → SMTP & API → 'API Keys' tab → Generate — it starts with 'xkeysib-'.",
+      };
+    }
     console.log('[email] channel: Brevo (HTTPS)');
     return sendViaBrevo(to, brevoKey, subject, text);
   }
