@@ -310,6 +310,46 @@ test('checkpoints can be restored under a chosen tag code', async () => {
   await db.deleteCheckpoint('abcd1234');
 });
 
+test('bulk restore creates checkpoints from pasted lines', async () => {
+  // admin login
+  let res = await fetch(`${base}/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'pin=1234',
+    redirect: 'manual',
+  });
+  const cookie = res.headers.get('set-cookie').split(';')[0];
+
+  const bulk = [
+    'aaaa1111, Main entrance, Ground floor',
+    'bbbb2222, Gym',
+    'aaaa1111, Duplicate of first',
+    'not-a-code, Broken line',
+  ].join('\n');
+  res = await fetch(`${base}/admin/checkpoints/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    body: 'bulk=' + encodeURIComponent(bulk),
+    redirect: 'manual',
+  });
+  assert.equal(res.status, 302);
+  assert.ok((await db.getCheckpoint('aaaa1111')), 'first restored');
+  assert.equal((await db.getCheckpoint('aaaa1111')).name, 'Main entrance');
+  assert.ok((await db.getCheckpoint('bbbb2222')), 'second restored');
+  // chip URL immediately works
+  assert.equal((await fetch(`${base}/t/aaaa1111`)).status, 200);
+  // inline rename
+  res = await fetch(`${base}/admin/checkpoints/bbbb2222/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    body: 'name=Sports+hall&location=Basement',
+    redirect: 'manual',
+  });
+  assert.equal((await db.getCheckpoint('bbbb2222')).name, 'Sports hall');
+  await db.deleteCheckpoint('aaaa1111');
+  await db.deleteCheckpoint('bbbb2222');
+});
+
 test('Brevo channel sends over HTTPS', async () => {
   const { sendEmail } = require('../src/notify');
   await db.setSetting('notify_email', 'director@example.com');

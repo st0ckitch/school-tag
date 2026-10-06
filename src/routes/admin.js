@@ -264,6 +264,7 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
        <h1>Checkpoints</h1>
        <div class="card">
          <h2>Add checkpoint</h2>
+         ${typeof req.query.msg === 'string' && req.query.msg ? `<p class="ok">✓ ${esc(req.query.msg)}</p>` : ''}
          ${typeof req.query.err === 'string' && req.query.err ? `<p class="bad">✕ ${esc(req.query.err)}</p>` : ''}
          <form method="post" action="/admin/checkpoints">
            <div class="row">
@@ -276,13 +277,28 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
          </form>
        </div>
        <div class="card">
+         <h2>Bulk restore</h2>
+         <p class="muted">One checkpoint per line: <code>tagcode, Name, Location</code> (location optional).
+            Get each chip's code and name from the phone's browser history (<code>chrome://history</code>, search
+            "school-tag" — entries look like "✓ Main entrance" with the /t/code in the URL) or from Railway's HTTP logs.</p>
+         <form method="post" action="/admin/checkpoints/bulk">
+           <textarea name="bulk" rows="10" style="width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:12px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:0.95rem" placeholder="63f91d85, Main entrance, Ground floor&#10;ece2c3ac, Gym&#10;dfbedd8d, Library, 1st floor"></textarea>
+           <button class="btn" type="submit" style="margin-top:10px">Restore all</button>
+         </form>
+       </div>
+       <div class="card">
          <table>
            <tr><th>Name</th><th>Location</th><th>Tag URL</th><th>Status</th><th></th></tr>
            ${checkpoints
              .map(
                (c) => `<tr>
-                 <td>${esc(c.name)}</td>
-                 <td class="muted">${esc(c.location)}</td>
+                 <td colspan="2">
+                   <form method="post" action="/admin/checkpoints/${esc(c.id)}/update" class="row" style="align-items:center">
+                     <input name="name" value="${esc(c.name)}" style="margin-bottom:0">
+                     <input name="location" value="${esc(c.location)}" placeholder="Location" style="margin-bottom:0">
+                     <button class="btn small secondary" type="submit" style="flex:none">Save</button>
+                   </form>
+                 </td>
                  <td><code>/t/${esc(c.id)}</code></td>
                  <td>${c.active ? '<span class="pill ok">active</span>' : '<span class="pill warn">disabled</span>'}</td>
                  <td style="white-space:nowrap">
@@ -312,6 +328,38 @@ router.post('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
       return res.redirect('/admin/checkpoints?err=' + encodeURIComponent(`A checkpoint with tag code ${tagCodeRaw} already exists.`));
     }
   }
+  res.redirect('/admin/checkpoints');
+}));
+
+router.post('/admin/checkpoints/bulk', wrap(requireAdmin), wrap(async (req, res) => {
+  const lines = String(req.body.bulk || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  let added = 0;
+  let duplicates = 0;
+  const invalid = [];
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].split(',').map((x) => x.trim());
+    const code = (parts[0] || '').toLowerCase();
+    const name = (parts[1] || '').slice(0, 120);
+    const location = (parts[2] || '').slice(0, 200);
+    if (!/^[0-9a-f]{6,16}$/.test(code) || !name) {
+      invalid.push(i + 1);
+      continue;
+    }
+    const created = await addCheckpoint(name, location, code);
+    if (created) added++;
+    else duplicates++;
+  }
+  const summary = `Restored ${added} checkpoint(s)` +
+    (duplicates ? `, skipped ${duplicates} already-existing` : '') +
+    (invalid.length ? `; invalid lines: ${invalid.join(', ')} (format: code, Name, Location)` : '') + '.';
+  res.redirect('/admin/checkpoints?' + (invalid.length ? 'err=' : 'msg=') + encodeURIComponent(summary));
+}));
+
+router.post('/admin/checkpoints/:id/update', wrap(requireAdmin), wrap(async (req, res) => {
+  await updateCheckpoint(req.params.id, {
+    name: (req.body.name || '').trim().slice(0, 120) || undefined,
+    location: (req.body.location || '').trim().slice(0, 200),
+  });
   res.redirect('/admin/checkpoints');
 }));
 
