@@ -28,7 +28,8 @@ async function completeWalkthrough(walkthrough) {
     (walkthrough.guard_name ? `Guard: ${walkthrough.guard_name}\n` : '') +
     `Started: ${fmtLocal(walkthrough.started_at)}\n` +
     `Finished: ${fmtLocal(new Date().toISOString())}`;
-  await sendEmail('✅ School security: walkthrough completed', message);
+  const emailResult = await sendEmail('✅ School security: walkthrough completed', message);
+  console.log('[email] completion email:', emailResult.ok ? 'sent' : `FAILED — ${emailResult.error}`);
 }
 
 // Closes a walkthrough that still has unscanned checkpoints and raises the
@@ -46,7 +47,8 @@ async function closeIncomplete(walkthrough, reason) {
 
   await addAlert(walkthrough.id, 'missed_checkpoints', message);
   await sendNotification('⚠️ School security: checkpoints missed', message);
-  await sendEmail('⚠️ School security: checkpoints missed', message);
+  const alertEmailResult = await sendEmail('⚠️ School security: checkpoints missed', message);
+  console.log('[email] alert email:', alertEmailResult.ok ? 'sent' : `FAILED — ${alertEmailResult.error}`);
   return missing;
 }
 

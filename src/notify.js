@@ -35,14 +35,33 @@ async function getVapidKeys() {
 //  - SMTP (e.g. Gmail with an App Password): free, works with any mailbox.
 async function sendEmail(subject, text) {
   const to = ((await getSetting('notify_email')) || '').trim();
-  if (!to) return { ok: false, error: 'recipient email not set' };
-
   const apiKey = ((await getSetting('mailchimp_api_key')) || '').trim();
   const smtpUser = ((await getSetting('smtp_user')) || '').trim();
   const smtpPass = ((await getSetting('smtp_pass')) || '').trim();
 
-  if (apiKey.startsWith('md-')) return sendViaMandrill(to, apiKey, subject, text);
-  if (smtpUser && smtpPass) return sendViaSmtp(to, smtpUser, smtpPass, subject, text);
+  // Diagnostic snapshot (no secrets) — shows up in the host's deploy logs.
+  console.log('[email] send requested:', {
+    subject,
+    to: to || '(empty)',
+    mailchimp_key: apiKey ? (apiKey.startsWith('md-') ? 'transactional' : 'marketing-type (unusable)') : '(empty)',
+    smtp_user: smtpUser || '(empty)',
+    smtp_pass: smtpPass ? `set (${smtpPass.length} chars)` : '(empty)',
+  });
+
+  if (!to) {
+    console.error('[email] aborted: recipient email not set');
+    return { ok: false, error: 'recipient email not set' };
+  }
+
+  if (apiKey.startsWith('md-')) {
+    console.log('[email] channel: Mailchimp Transactional');
+    return sendViaMandrill(to, apiKey, subject, text);
+  }
+  if (smtpUser && smtpPass) {
+    console.log('[email] channel: SMTP');
+    return sendViaSmtp(to, smtpUser, smtpPass, subject, text);
+  }
+  console.error('[email] aborted: no usable channel configured');
   if (apiKey) {
     return {
       ok: false,
@@ -85,6 +104,7 @@ async function sendViaMandrill(to, apiKey, subject, text) {
       console.error('[notify] mailchimp email rejected:', first.reject_reason);
       return { ok: false, error: `rejected: ${first.reject_reason}` };
     }
+    console.log('[email] Mailchimp sent OK:', first && first.status);
     return { ok: true };
   } catch (err) {
     console.error('[notify] mailchimp email failed:', err.message);
@@ -107,11 +127,20 @@ async function sendViaSmtp(to, user, pass, subject, text) {
       greetingTimeout: 8000,
       socketTimeout: 12000,
     });
+    console.log('[email] SMTP connecting:', { host, port, user, from, to });
     await transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text });
+    console.log('[email] SMTP sent OK to', to);
     return { ok: true };
   } catch (err) {
-    console.error('[notify] smtp email failed:', err.message);
-    return { ok: false, error: err.message };
+    console.error('[email] SMTP send FAILED:', {
+      message: err.message,
+      code: err.code,
+      responseCode: err.responseCode,
+      command: err.command,
+      response: err.response,
+    });
+    const detail = err.response ? `${err.message} — server said: ${err.response}` : err.message;
+    return { ok: false, error: detail };
   }
 }
 

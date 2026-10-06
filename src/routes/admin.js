@@ -588,10 +588,12 @@ async function saveSettings(req) {
 // the fields is exactly what gets tested.
 router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, res) => {
   await saveSettings(req);
+  console.log('[email] test email requested from admin settings');
   const result = await sendEmail(
     'School Tag: test email',
     'This is a test email from your School Tag admin settings. If you can read this, email notifications are working.'
   );
+  console.log('[email] test result:', result);
   res.redirect('/admin/settings?email_test=' + encodeURIComponent(result.ok ? 'ok' : result.error || 'failed'));
 }));
 
