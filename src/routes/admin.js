@@ -563,16 +563,31 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <label for="android_sha256">Signing certificate SHA-256 fingerprint</label>
            <input id="android_sha256" name="android_sha256" value="${esc(androidSha256)}" placeholder="AA:BB:CC:...">
          </div>
-         <button class="btn" type="submit">Save</button>
-       </form>
-       <form method="post" action="/admin/settings/test-email" style="margin-top:12px">
-         <button class="btn secondary" type="submit">Send test email (uses the saved values above)</button>
+         <div class="row">
+           <button class="btn" type="submit">Save</button>
+           <button class="btn secondary" type="submit" formaction="/admin/settings/test-email">Save &amp; send test email</button>
+         </div>
        </form>`
     )
   );
 }));
 
+const SETTINGS_KEYS = [
+  'walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin',
+  'android_package', 'android_sha256', 'notify_email', 'mailchimp_api_key',
+  'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from',
+];
+
+async function saveSettings(req) {
+  for (const key of SETTINGS_KEYS) {
+    if (req.body[key] !== undefined) await setSetting(key, String(req.body[key]).trim());
+  }
+}
+
+// Saves the submitted form first, then sends the test — so what you see in
+// the fields is exactly what gets tested.
 router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, res) => {
+  await saveSettings(req);
   const result = await sendEmail(
     'School Tag: test email',
     'This is a test email from your School Tag admin settings. If you can read this, email notifications are working.'
@@ -581,9 +596,7 @@ router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, r
 }));
 
 router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
-  for (const key of ['walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin', 'android_package', 'android_sha256', 'notify_email', 'mailchimp_api_key', 'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from']) {
-    if (req.body[key] !== undefined) await setSetting(key, String(req.body[key]).trim());
-  }
+  await saveSettings(req);
   res.redirect('/admin/settings');
 }));
 
