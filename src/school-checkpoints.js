@@ -66,6 +66,21 @@ async function previousNameForCode(code) {
   return row.location ? `${row.name} — ${row.location}` : row.name;
 }
 
+// When the replace happened and what every old code was called, so history
+// pages of earlier rounds can show the names guards saw at the time.
+async function resetInfo() {
+  const at = await getSetting(SETUP_FLAG);
+  const names = new Map();
+  try {
+    for (const row of JSON.parse((await getSetting(BACKUP_KEY)) || '[]')) {
+      if (row && row.id) names.set(row.id, row.location ? `${row.name} — ${row.location}` : row.name);
+    }
+  } catch (err) {
+    // an unreadable backup only costs the old names
+  }
+  return { at, names };
+}
+
 // Memoized so the serverless entry point can await it from a middleware.
 let setupPromise = null;
 function ensureSchoolCheckpoints() {
@@ -81,4 +96,5 @@ module.exports = {
   applySchoolCheckpoints,
   ensureSchoolCheckpoints,
   previousNameForCode,
+  resetInfo,
 };

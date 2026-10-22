@@ -16,7 +16,12 @@ function readDeviceCookie(req) {
     .map((c) => c.trim())
     .find((c) => c.startsWith('device='));
   if (!raw) return null;
-  const value = decodeURIComponent(raw.slice('device='.length));
+  let value;
+  try {
+    value = decodeURIComponent(raw.slice('device='.length));
+  } catch (err) {
+    return null; // malformed cookie reads as "no device", never a 500
+  }
   const idx = value.indexOf('.');
   if (idx < 0) return null;
   return { id: value.slice(0, idx), token: value.slice(idx + 1) };

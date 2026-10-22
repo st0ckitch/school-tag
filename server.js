@@ -12,7 +12,8 @@ const { ensureSchoolCheckpoints } = require('./src/school-checkpoints');
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.urlencoded({ extended: false }));
+// Bulk restore accepts pasted hosting logs, which run to megabytes.
+app.use(express.urlencoded({ extended: false, limit: '5mb' }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -95,6 +96,10 @@ app.get('/.well-known/assetlinks.json', wrap(async (req, res) => {
 app.use((err, req, res, next) => {
   console.error(err);
   if (res.headersSent) return next(err);
+  if (err.type === 'entity.too.large') {
+    res.status(413).type('text/plain').send('The pasted text is too large (over 5 MB). Paste it in smaller parts.');
+    return;
+  }
   res.status(500).type('text/plain').send('Internal server error');
 });
 

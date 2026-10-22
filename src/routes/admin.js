@@ -24,9 +24,11 @@ const {
   deleteDevice,
   markLinked,
   linkTag,
+  alertsForWalkthrough,
 } = require('../db');
 const { tick } = require('../scheduler');
 const { sendEmail } = require('../notify');
+const { resetInfo } = require('../school-checkpoints');
 const { esc, page } = require('../html');
 
 const router = express.Router();
@@ -64,6 +66,23 @@ async function hasSession(req) {
   const mac = Buffer.from(value.slice(idx + 1));
   const expected = Buffer.from(await sign(token));
   return mac.length === expected.length && crypto.timingSafeEqual(mac, expected);
+}
+
+// Status messages travel in the redirect URL; the signature stops anyone from
+// sending the admin a link that shows invented text inside the admin UI.
+async function flashUrl(path, key, text) {
+  const value = String(text).toWellFormed();
+  const sig = (await sign(`flash:${key}:${value}`)).slice(0, 32);
+  return `${path}?${key}=${encodeURIComponent(value)}&sig=${sig}`;
+}
+
+async function readFlash(req, key) {
+  const value = req.query[key];
+  const sig = req.query.sig;
+  if (typeof value !== 'string' || !value || typeof sig !== 'string') return '';
+  const expected = Buffer.from((await sign(`flash:${key}:${value}`)).slice(0, 32));
+  const given = Buffer.from(sig);
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected) ? value : '';
 }
 
 async function requireAdmin(req, res, next) {
@@ -265,6 +284,8 @@ router.post('/admin/alerts/:id/ack', wrap(requireAdmin), wrap(async (req, res) =
 
 router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const checkpoints = await listCheckpoints();
+  const flashMsg = await readFlash(req, 'msg');
+  const flashErr = await readFlash(req, 'err');
   const activeReal = checkpoints.filter((c) => c.active && !c.placeholder);
   const unlinkedCount = activeReal.filter((c) => !c.is_linked).length;
   res.send(
@@ -279,8 +300,8 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
        }</div>
        <div class="card">
          <h2>Add checkpoint</h2>
-         ${typeof req.query.msg === 'string' && req.query.msg ? `<p class="ok">✓ ${esc(req.query.msg)}</p>` : ''}
-         ${typeof req.query.err === 'string' && req.query.err ? `<p class="bad">✕ ${esc(req.query.err)}</p>` : ''}
+         ${flashMsg ? `<p class="ok">✓ ${esc(flashMsg)}</p>` : ''}
+         ${flashErr ? `<p class="bad">✕ ${esc(flashErr)}</p>` : ''}
          <form method="post" action="/admin/checkpoints">
            <div class="row">
              <div><label for="name">Name</label><input id="name" name="name" required placeholder="e.g. Main entrance"></div>
@@ -297,7 +318,7 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
          <ul class="muted" style="font-size:.9rem;margin-top:0">
            <li><code>Name</code> — creates a checkpoint; tap its chip later with an admin-logged-in phone to link it.</li>
            <li><code>tagcode, Name, Location</code> — binds that chip to the checkpoint with that name (or creates it).</li>
-           <li>Anything containing tag links (Railway logs, browser history, URL lists) — every <code>/t/code</code> found is added as "Tag code".</li>
+           <li>Anything containing tag links (Railway logs, browser history, URL lists) — every <code>/t/code</code> found is added as "Tag code". In such a paste only lines with codes are used; other text is ignored.</li>
          </ul>
          <form method="post" action="/admin/checkpoints/bulk">
            <textarea name="bulk" rows="10" style="width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:12px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:0.95rem" placeholder="63f91d85, Main entrance, Ground floor&#10;ece2c3ac, Gym&#10;dfbedd8d, Library, 1st floor"></textarea>
@@ -339,27 +360,38 @@ router.post('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const location = (req.body.location || '').trim().slice(0, 200);
   const tagCodeRaw = (req.body.tag_code || '').trim().toLowerCase();
   if (tagCodeRaw && !/^[0-9a-f]{6,16}$/.test(tagCodeRaw)) {
-    return res.redirect('/admin/checkpoints?err=' + encodeURIComponent('Tag code must be 6-16 characters of 0-9 and a-f.'));
+    return res.redirect(await flashUrl('/admin/checkpoints', 'err', 'Tag code must be 6-16 characters of 0-9 and a-f.'));
   }
   if (name) {
     const created = await addCheckpoint(name, location, tagCodeRaw || undefined);
     if (!created) {
-      return res.redirect('/admin/checkpoints?err=' + encodeURIComponent(`A checkpoint with tag code ${tagCodeRaw} already exists.`));
+      return res.redirect(await flashUrl('/admin/checkpoints', 'err', `A checkpoint with tag code ${tagCodeRaw} already exists.`));
     }
   }
   res.redirect('/admin/checkpoints');
 }));
 
-const INVISIBLE_CHARS = /[​-‍⁠﻿]/g;
-const NUMBERING = /^\d+\s*[.)]\s+/;
-// Separators accepted between a tag code and its name (comma, or a tab from
-// a spreadsheet, semicolon, pipe).
-const CODE_LINE = /^([0-9a-fA-F]{6,16})(?:\s*[,\t;|]\s*(.*))?$/;
-// A URL at the start of a line stands for its code: "URL, Name" = "code, Name".
-const LEADING_URL = /^(?:https?:\/\/[^\s,;|]*)?\/t\/([0-9a-fA-F]{6,16})\b/;
+// Zero-width characters, LRM/RLM marks, word joiners and BOMs that phones
+// insert when copying.
+const INVISIBLE_CHARS = /[​-‏⁠﻿]/g;
+// Bullets, quotes, table pipes and separators in front of an item.
+const LEAD_JUNK = /^[\s,;|•·*"'«»“”„\-–—]+/;
+const NUMBER_MARK = /^\d+\s*[.)]\s*/;
+// "code, Name" — also with a tab (spreadsheets), semicolon, pipe, colon or =.
+const CODE_LINE = /^([0-9a-fA-F]{6,16})(?:\s*[,\t;|:=]\s*(.*))?$/;
+// A tag link at the start of an item stands for its code, with or without
+// scheme/host and with any trailing path or query.
+const LEADING_URL = /^(?:https?:\/\/)?(?:[^\s\/,;|]+)?\/t\/([0-9a-fA-F]{6,16})(?:[\/?#][^\s,;|]*)?/;
+const URL_NAME_SEP = /^\s*(?:[,\t;|]|\s[-–—:]\s)\s*/;
+// A standalone 6-16 character hex token containing a digit, anywhere.
+const CODE_TOKEN = /(^|[^0-9a-z])(?=[0-9a-f]*\d)[0-9a-f]{6,16}(?=[^0-9a-z]|$)/i;
+
+function truncate(text, max) {
+  return Array.from(String(text)).slice(0, max).join('');
+}
 
 function trimSeparators(text) {
-  return text.replace(/^[\s,;]+|[\s,;]+$/g, '');
+  return String(text).replace(/^[\s,;|]+|[\s,;|]+$/g, '');
 }
 
 function normalizeName(name) {
@@ -368,7 +400,15 @@ function normalizeName(name) {
 
 function quote(text) {
   const t = String(text).trim();
-  return `"${t.length > 30 ? `${t.slice(0, 30)}…` : t}"`;
+  return `"${Array.from(t).length > 30 ? `${truncate(t, 30)}…` : t}"`;
+}
+
+// A code with a typo (one or two non-hex characters) or with spaces inside.
+function looksLikeMistypedCode(field) {
+  const compact = field.replace(/\s+/g, '');
+  if (!/^[0-9a-z]{6,16}$/i.test(compact) || !/\d/.test(compact)) return false;
+  const nonHex = compact.replace(/[0-9a-f]/gi, '').length;
+  return nonHex <= 2 && (nonHex > 0 || compact !== field.trim());
 }
 
 // Splits a paste into items: { code?, name, location, placeholder }.
@@ -386,40 +426,73 @@ function parseBulk(rawInput) {
     code = code.toLowerCase();
     if (seenCodes.has(code)) return; // first occurrence wins
     seenCodes.add(code);
-    const cleanName = trimSeparators(name || '').slice(0, 120);
+    const cleanName = truncate(trimSeparators(name || ''), 120);
     items.push({
       code,
       name: cleanName || `Tag ${code}`,
-      location: trimSeparators(location || '').slice(0, 200),
+      location: truncate(trimSeparators(location || ''), 200),
       placeholder: !cleanName,
     });
   };
+  const reject = (piece) => {
+    if (linkMode) ignored++;
+    else problems.push(quote(piece));
+  };
+  const fieldsAfter = (text) => {
+    const fields = text.split(/\s*[,\t;|]\s*/).map(trimSeparators);
+    const at = fields.findIndex(Boolean); // first non-empty field is the name
+    return at < 0 ? ['', ''] : [fields[at], fields.slice(at + 1).filter(Boolean).join(', ')];
+  };
 
   for (const rawLine of raw.split(/\r?\n/)) {
-    let line = rawLine.trim();
+    const line = rawLine.replace(LEAD_JUNK, '').trim();
     if (!line) continue;
-    const url = line.match(LEADING_URL);
-    if (url) line = url[1] + line.slice(url[0].length);
-    if (/\/t\//.test(line)) continue; // log line; its codes are extracted below
+    // Header row of a copied table ("Tag code<TAB>Name", "| Code | Name |").
+    if (/^(tag\s*)?code\b/i.test(line) && /\bname\b/i.test(line)) {
+      ignored++;
+      continue;
+    }
 
-    // "1. A, 2. B, 3. C" on one line: split only lines that start numbered.
-    const pieces = NUMBERING.test(line) ? line.split(/[,;]\s*(?=\d+\s*[.)]\s)/) : [line];
+    // "1. A, 2. B, 3. C" on one line.
+    const numberedList = NUMBER_MARK.test(line) && /[,;]\s*\d+\s*[.)]/.test(line);
+    const pieces = numberedList ? line.split(/[,;]\s*(?=\d+\s*[.)])/) : [line];
     for (const rawPiece of pieces) {
-      const piece = trimSeparators(rawPiece.replace(NUMBERING, ''));
+      const piece = trimSeparators(rawPiece.replace(LEAD_JUNK, '').replace(NUMBER_MARK, ''));
       if (!piece) continue;
+
+      const url = piece.match(LEADING_URL);
+      if (url) {
+        const rest = piece.slice(url[0].length);
+        const sep = rest.match(URL_NAME_SEP);
+        const [name, location] = sep ? fieldsAfter(rest.slice(sep[0].length)) : ['', ''];
+        addCode(url[1], name, location);
+        continue;
+      }
+      if (/\/t\//.test(piece)) continue; // log line; its codes are extracted below
+
       const codeLine = piece.match(CODE_LINE);
       if (codeLine) {
-        const rest = (codeLine[2] || '').split(/\s*[,\t;|]\s*/);
-        addCode(codeLine[1], rest[0], rest.slice(1).filter(Boolean).join(', '));
-      } else if (/^(?=[^\s,]*\d)[0-9a-z]{6,16}\s*[,\t;|]/i.test(piece) || /^[0-9a-f]{6,16}\s+\S/i.test(piece)) {
-        // A mistyped code, or a code separated from its name by a space.
-        if (linkMode) ignored++;
-        else problems.push(quote(piece));
-      } else if (linkMode) {
-        ignored++;
-      } else {
-        items.push({ name: piece.slice(0, 120), location: '', placeholder: false });
+        const [name, location] = fieldsAfter(codeLine[2] || '');
+        if (!name && (linkMode || !/\d/.test(codeLine[1]))) {
+          // A bare hex word: noise in a log paste, a plain name otherwise.
+          if (linkMode) ignored++;
+          else items.push({ name: truncate(piece, 120), location: '', placeholder: false });
+          continue;
+        }
+        addCode(codeLine[1], name, location);
+        continue;
       }
+
+      const firstField = (piece.match(/^([^,\t;|:=]+)[,\t;|:=]/) || [null, piece])[1];
+      if (looksLikeMistypedCode(firstField) || CODE_TOKEN.test(piece)) {
+        reject(piece);
+        continue;
+      }
+      if (linkMode) {
+        ignored++;
+        continue;
+      }
+      items.push({ name: truncate(piece, 120), location: '', placeholder: false });
     }
   }
 
@@ -427,11 +500,13 @@ function parseBulk(rawInput) {
   return { items, problems, ignored };
 }
 
+// Normalized name -> checkpoints with that name, in list order.
 async function nameIndex() {
   const index = new Map();
   for (const c of await listCheckpoints()) {
     const key = normalizeName(c.name);
-    if (!index.has(key)) index.set(key, c);
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(c);
   }
   return index;
 }
@@ -440,45 +515,63 @@ router.post('/admin/checkpoints/bulk', wrap(requireAdmin), wrap(async (req, res)
   const { items, problems, ignored } = parseBulk(req.body.bulk);
 
   let index = await nameIndex();
-  // Names created or linked by this paste: a second line with the same name
-  // is a different chip, not a link to the checkpoint made a moment ago.
-  const touched = new Set();
+  // Names bound to a chip by an earlier line of this paste: a later line with
+  // the same name is a different chip. Names created without a code can still
+  // be bound once by a later "code, Name" line.
+  const boundInPaste = new Set();
+  const namedInPaste = new Set();
   const counts = { added: 0, linked: 0, renamed: 0, skipped: 0, duplicates: 0 };
-  const displaced = [];
+  const displacedNames = new Set();
+  const conflicts = [];
 
   for (const item of items) {
     const key = item.placeholder ? null : normalizeName(item.name);
 
     if (!item.code) {
-      if (touched.has(key)) counts.duplicates++;
+      if (boundInPaste.has(key) || namedInPaste.has(key)) counts.duplicates++;
       else if (index.has(key)) counts.skipped++;
       else {
         await addCheckpoint(item.name, item.location);
         counts.added++;
-        touched.add(key);
+        namedInPaste.add(key);
         index = await nameIndex();
       }
       continue;
     }
 
-    const sameName = key && !touched.has(key) ? index.get(key) : null;
-    if (sameName) {
-      if (sameName.id === item.code) {
-        await markLinked(item.code);
-        counts.skipped++;
-      } else {
-        const holder = await getCheckpoint(item.code);
-        await linkTag(item.code, sameName.id);
-        if (item.location) await updateCheckpoint(item.code, { location: item.location });
-        if (holder && !holder.placeholder) displaced.push(holder.name);
-        counts.linked++;
+    const holder = await getCheckpoint(item.code);
+
+    // The chip already belongs to a checkpoint of that name: nothing to bind.
+    if (holder && key && normalizeName(holder.name) === key) {
+      await markLinked(item.code);
+      if (item.location && item.location !== holder.location) {
+        await updateCheckpoint(item.code, { location: item.location });
       }
-      touched.add(key);
+      counts.skipped++;
+      boundInPaste.add(key);
       index = await nameIndex();
       continue;
     }
 
-    const holder = await getCheckpoint(item.code);
+    const sameNames = key && !boundInPaste.has(key) ? (index.get(key) || []) : [];
+    const unlinked = sameNames.filter((c) => !c.linked);
+    let target = unlinked[0] || null;
+    if (!target && sameNames.length === 1) target = sameNames[0]; // a swap/correction
+    if (!target && sameNames.length > 1) {
+      conflicts.push(`${quote(item.name)} matches ${sameNames.length} linked checkpoints — line for ${item.code} not applied`);
+      continue;
+    }
+
+    if (target) {
+      await linkTag(item.code, target.id);
+      if (item.location) await updateCheckpoint(item.code, { location: item.location });
+      if (holder && !holder.placeholder) displacedNames.add(normalizeName(holder.name));
+      counts.linked++;
+      boundInPaste.add(key);
+      index = await nameIndex();
+      continue;
+    }
+
     if (!holder) {
       await addCheckpoint(item.name, item.location, item.code, { placeholder: item.placeholder });
       if (!item.placeholder) await markLinked(item.code);
@@ -491,35 +584,47 @@ router.post('/admin/checkpoints/bulk', wrap(requireAdmin), wrap(async (req, res)
       });
       await markLinked(item.code);
       counts.renamed++;
-    } else {
+    } else if (item.placeholder) {
       counts.skipped++;
       continue;
+    } else {
+      conflicts.push(`${item.code} is already ${quote(holder.name)} — not changed`);
+      continue;
     }
-    if (key) touched.add(key);
+    if (key) boundInPaste.add(key);
     index = await nameIndex();
   }
+
+  // Only report displaced checkpoints that no later line re-linked.
+  const stillUnlinked = (await listCheckpoints())
+    .filter((c) => !c.linked && !c.placeholder && displacedNames.has(normalizeName(c.name)))
+    .map((c) => c.name);
 
   const parts = [`Created ${counts.added}`];
   if (counts.linked) parts.push(`linked ${counts.linked} chip(s) to existing checkpoints`);
   if (counts.renamed) parts.push(`named ${counts.renamed} placeholder(s)`);
-  if (counts.skipped) parts.push(`skipped ${counts.skipped} already existing`);
+  if (counts.skipped) parts.push(`skipped ${counts.skipped} already up to date`);
   if (counts.duplicates) parts.push(`ignored ${counts.duplicates} repeated in this paste`);
-  if (ignored) parts.push(`ignored ${ignored} non-tag line(s) of the pasted log/links`);
+  if (ignored) parts.push(`ignored ${ignored} line(s) without a tag code`);
   let summary = parts.join(', ') + '.';
-  if (displaced.length) {
-    summary += ` Moved chips away from: ${displaced.slice(0, 5).join(', ')}${displaced.length > 5 ? '…' : ''} (now not linked).`;
+  if (stillUnlinked.length) {
+    summary += ` Now without a chip: ${stillUnlinked.slice(0, 5).join(', ')}${stillUnlinked.length > 5 ? '…' : ''}.`;
+  }
+  if (conflicts.length) {
+    summary += ` ${conflicts.slice(0, 3).join('; ')}${conflicts.length > 3 ? ` (and ${conflicts.length - 3} more)` : ''}.`;
   }
   if (problems.length) {
-    summary += ` Not understood: ${problems.slice(0, 3).join(', ')}${problems.length > 3 ? ` and ${problems.length - 3} more` : ''} — tag codes are 6-16 characters of 0-9 and a-f, written "code, Name".`;
+    summary += ` Not understood: ${problems.slice(0, 3).join(', ')}${problems.length > 3 ? ` and ${problems.length - 3} more` : ''} — write "code, Name"; tag codes are 6-16 characters of 0-9 and a-f.`;
   }
   const changed = counts.added + counts.linked + counts.renamed;
-  res.redirect('/admin/checkpoints?' + (changed || !problems.length ? 'msg=' : 'err=') + encodeURIComponent(summary));
+  const failed = problems.length || conflicts.length;
+  res.redirect(await flashUrl('/admin/checkpoints', changed || !failed ? 'msg' : 'err', summary));
 }));
 
 router.post('/admin/checkpoints/:id/update', wrap(requireAdmin), wrap(async (req, res) => {
   await updateCheckpoint(req.params.id, {
-    name: (req.body.name || '').trim().slice(0, 120) || undefined,
-    location: (req.body.location || '').trim().slice(0, 200),
+    name: truncate((req.body.name || '').trim(), 120) || undefined,
+    location: truncate((req.body.location || '').trim(), 200),
   });
   res.redirect('/admin/checkpoints');
 }));
@@ -685,6 +790,13 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
   const allCheckpoints = await listCheckpoints();
   const scannedIds = new Set(scans.map((s) => s.checkpoint_id));
   const missed = allCheckpoints.filter((c) => c.active && !scannedIds.has(c.id));
+  // Rounds from before the checkpoint list was replaced are shown with the
+  // names of that time, and their missed list comes from the alert actually
+  // sent — today's checkpoints did not exist then.
+  const reset = await resetInfo();
+  const preReset = Boolean(reset.at) && w.started_at < reset.at;
+  const scanName = (s) => (preReset && reset.names.get(s.checkpoint_id)) || s.checkpoint_name || s.checkpoint_id;
+  const preResetAlerts = preReset ? await alertsForWalkthrough(w.id) : [];
   res.send(
     adminPage(
       'Walkthrough — School Tag',
@@ -694,13 +806,23 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
        <div class="card">
          <h2>Scanned (${scans.length})</h2>
          <ul class="plain">
-           ${scans.map((s) => `<li><span>${esc(s.checkpoint_name || s.checkpoint_id)}</span><span class="muted">${fmtTime(s.scanned_at)}</span></li>`).join('')}
+           ${scans.map((s) => `<li><span>${esc(scanName(s))}</span><span class="muted">${fmtTime(s.scanned_at)}</span></li>`).join('')}
          </ul>
          ${scans.length === 0 ? '<p class="muted">Nothing scanned.</p>' : ''}
        </div>
        ${
          w.status === 'cancelled'
            ? '<div class="card"><p class="muted">This round was cancelled (for example when the checkpoint list was replaced), so no missed checkpoints are listed.</p></div>'
+           : preReset
+           ? w.status === 'completed'
+             ? ''
+             : `<div class="card">
+                  <h2 class="bad">Missed</h2>
+                  <p class="muted">This round ran before the checkpoint list was replaced; this is the alert that was sent at the time.</p>
+                  ${preResetAlerts.length
+                    ? preResetAlerts.map((a) => `<div style="white-space:pre-line">${esc(a.message)}</div>`).join('')
+                    : '<p class="muted">No alert was recorded for this round.</p>'}
+                </div>`
            : w.status !== 'completed' && (missed.length || missing.length)
            ? `<div class="card">
                 <h2 class="bad">Missed (${missed.length})</h2>
@@ -732,7 +854,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const smtpFrom = (await getSetting('smtp_from')) || '';
   const brevoApiKey = (await getSetting('brevo_api_key')) || '';
   const brevoFromEmail = (await getSetting('brevo_from_email')) || '';
-  const emailTest = typeof req.query.email_test === 'string' ? req.query.email_test : '';
+  const emailTest = await readFlash(req, 'email_test');
   res.send(
     adminPage(
       'Settings — School Tag',
@@ -826,7 +948,7 @@ router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, r
     'This is a test email from your School Tag admin settings. If you can read this, email notifications are working.'
   );
   console.log('[email] test result:', result);
-  res.redirect('/admin/settings?email_test=' + encodeURIComponent(result.ok ? 'ok' : result.error || 'failed'));
+  res.redirect(await flashUrl('/admin/settings', 'email_test', result.ok ? 'ok' : result.error || 'failed'));
 }));
 
 router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {

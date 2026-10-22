@@ -217,15 +217,14 @@ function newCheckpointId() {
   return crypto.randomBytes(4).toString('hex');
 }
 
-// is_linked: a chip has been bound to the checkpoint, either through the
-// link flow or implicitly by having been scanned.
+// is_linked: a chip has been bound to the checkpoint (through the link flow,
+// a restore line naming its code, or a tap of its URL). Scans alone do not
+// count: a re-linked checkpoint keeps its old scans but has no chip.
 async function listCheckpoints(activeOnly = false) {
   await ensureReady();
   const where = activeOnly ? 'WHERE c.active = 1' : '';
   const rs = await client.execute(
-    `SELECT c.*,
-            (c.linked = 1 OR EXISTS (SELECT 1 FROM scans s WHERE s.checkpoint_id = c.id)) AS is_linked
-     FROM checkpoints c ${where} ORDER BY c.sort_order, c.name`
+    `SELECT c.*, c.linked AS is_linked FROM checkpoints c ${where} ORDER BY c.sort_order, c.name`
   );
   return rs.rows;
 }
@@ -233,9 +232,7 @@ async function listCheckpoints(activeOnly = false) {
 async function getCheckpoint(id) {
   await ensureReady();
   const rs = await client.execute({
-    sql: `SELECT c.*,
-                 (c.linked = 1 OR EXISTS (SELECT 1 FROM scans s WHERE s.checkpoint_id = c.id)) AS is_linked
-          FROM checkpoints c WHERE c.id = ?`,
+    sql: 'SELECT c.*, c.linked AS is_linked FROM checkpoints c WHERE c.id = ?',
     args: [id],
   });
   return rs.rows[0];
@@ -495,6 +492,15 @@ async function unacknowledgedAlerts() {
   return rs.rows;
 }
 
+async function alertsForWalkthrough(walkthroughId) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: 'SELECT * FROM alerts WHERE walkthrough_id = ? ORDER BY created_at',
+    args: [walkthroughId],
+  });
+  return rs.rows;
+}
+
 async function acknowledgeAlert(id) {
   await ensureReady();
   await client.execute({ sql: 'UPDATE alerts SET acknowledged = 1 WHERE id = ?', args: [id] });
@@ -632,6 +638,7 @@ module.exports = {
   addAlert,
   listAlerts,
   unacknowledgedAlerts,
+  alertsForWalkthrough,
   acknowledgeAlert,
   listDevices,
   countDevices,

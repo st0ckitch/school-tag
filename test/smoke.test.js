@@ -733,12 +733,145 @@ test('a malformed session cookie does not break chip taps', async () => {
   await db.deleteCheckpoint(cp.id);
 });
 
+test('a checkpoint displaced by a re-link reads as not linked, despite its old scans', async () => {
+  const a = await db.addCheckpoint('Displaced A', '');
+  const b = await db.addCheckpoint('Displaced B', '');
+  await db.linkTag('ca110001', a.id);
+  const w = await db.startWalkthrough('DisplaceRound');
+  await db.recordScan(w.id, 'ca110001');
+  for (const cp of await db.listCheckpoints(true)) await db.recordScan(w.id, cp.id);
+  await db.finishWalkthrough(w.id, 'completed');
+  await db.linkTag('ca110001', (await db.listCheckpoints()).find((c) => c.name === 'Displaced B').id);
+  const displaced = (await db.listCheckpoints()).find((c) => c.name === 'Displaced A');
+  assert.equal(displaced.is_linked, 0, 'no chip carries its new code');
+  await db.deleteCheckpoint(displaced.id);
+  await db.deleteCheckpoint('ca110001');
+});
+
+async function bulkPost(text) {
+  const cookie = await adminCookie();
+  const res = await fetch(`${base}/admin/checkpoints/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    body: 'bulk=' + encodeURIComponent(text),
+    redirect: 'manual',
+  });
+  return res;
+}
+
+test('bulk: re-pasting same-name chips is a no-op in any order', async () => {
+  await bulkPost('ab120001, Stairs, Floor 1\nab120002, Stairs, Floor 2');
+  const snapshot = async () =>
+    (await db.listCheckpoints())
+      .filter((c) => c.name === 'Stairs')
+      .map((c) => `${c.id}:${c.location}:${c.linked}`)
+      .sort()
+      .join('|');
+  const before = await snapshot();
+  assert.equal(before, 'ab120001:Floor 1:1|ab120002:Floor 2:1');
+  await bulkPost('ab120002, Stairs, Floor 2');
+  assert.equal(await snapshot(), before);
+  await bulkPost('ab120002, Stairs, Floor 2\nab120001, Stairs, Floor 1');
+  assert.equal(await snapshot(), before);
+  await db.deleteCheckpoint('ab120001');
+  await db.deleteCheckpoint('ab120002');
+});
+
+test('bulk: code-bearing junk shapes are reported, never created as names', async () => {
+  const count = async () => (await db.listCheckpoints()).length;
+  const before = await count();
+  for (const bad of ['Junk Place - fa110a01', 'Junk Place, fa110a01', 'fa11 0a01, Junk Place', 'fa110a0z, Junk Place']) {
+    await bulkPost(bad);
+    assert.equal(await count(), before, `"${bad}" must not create a checkpoint`);
+  }
+  // Colon/= separators and tab tables with a header row are understood.
+  await bulkPost('fa110a02: Colon Place\nfa110a03=Equals Place');
+  assert.equal((await db.getCheckpoint('fa110a02')).name, 'Colon Place');
+  assert.equal((await db.getCheckpoint('fa110a03')).name, 'Equals Place');
+  await bulkPost('Tag code\tName\nfa110a04\tTab Place');
+  await bulkPost('| Code | Name |\n|---|---|\n| fa110a05 | Pipe Place |');
+  assert.equal((await db.getCheckpoint('fa110a04')).name, 'Tab Place');
+  assert.equal((await db.getCheckpoint('fa110a05')).name, 'Pipe Place');
+  assert.equal(await count(), before + 4, 'header rows created nothing');
+  for (const id of ['fa110a02', 'fa110a03', 'fa110a04', 'fa110a05']) await db.deleteCheckpoint(id);
+});
+
+test('bulk: a name-only line can be bound by a later code line', async () => {
+  await bulkPost('Bound Later\nfb110001, Bound Later');
+  const rows = (await db.listCheckpoints()).filter((c) => c.name === 'Bound Later');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, 'fb110001');
+  assert.equal(rows[0].linked, 1);
+  await db.deleteCheckpoint('fb110001');
+});
+
+test('bulk: numbered lists survive leading bullets/quotes; URL forms keep names', async () => {
+  for (const prefix of [', ', '• ', '"', '- ']) {
+    await bulkPost(`${prefix}1. Bullet A, 2. Bullet B`);
+    const names = (await db.listCheckpoints()).map((c) => c.name);
+    assert.ok(names.includes('Bullet A') && names.includes('Bullet B'), `prefix ${JSON.stringify(prefix)}`);
+    for (const c of await db.listCheckpoints()) if (/^Bullet [AB]$/.test(c.name)) await db.deleteCheckpoint(c.id);
+  }
+  await bulkPost([
+    '1. https://school-tag-production.up.railway.app/t/fc110001, Url One',
+    'school-tag-production.up.railway.app/t/fc110002, Url Two',
+    'https://school-tag-production.up.railway.app/t/fc110003 - Url Three',
+    'https://school-tag-production.up.railway.app/t/fc110004?nfc=1, Url Four',
+  ].join('\n'));
+  assert.equal((await db.getCheckpoint('fc110001')).name, 'Url One');
+  assert.equal((await db.getCheckpoint('fc110002')).name, 'Url Two');
+  assert.equal((await db.getCheckpoint('fc110003')).name, 'Url Three');
+  assert.equal((await db.getCheckpoint('fc110004')).name, 'Url Four');
+  for (const id of ['fc110001', 'fc110002', 'fc110003', 'fc110004']) await db.deleteCheckpoint(id);
+});
+
+test('bulk: large log pastes work; emoji at the cut-off point does not crash', async () => {
+  const line = '2026-10-21T10:00:00.000Z GET /t/fd110001 200 0ms school-tag-production.up.railway.app';
+  const big = Array(2500).fill(line).join('\n'); // ~220 KB
+  let res = await bulkPost(big);
+  assert.equal(res.status, 302);
+  assert.ok(await db.getCheckpoint('fd110001'));
+  await db.deleteCheckpoint('fd110001');
+
+  res = await bulkPost('x'.repeat(29) + '😀😀😀, more' + '\nfd110002' + 'z, x');
+  assert.equal(res.status, 302, 'surrogate pairs at truncation must not cause a 500');
+});
+
+test('status messages in admin URLs must carry a valid signature', async () => {
+  const cookie = await adminCookie();
+  const html = await (
+    await fetch(`${base}/admin/checkpoints?msg=${encodeURIComponent('Fake success text')}`, { headers: { Cookie: cookie } })
+  ).text();
+  assert.doesNotMatch(html, /Fake success text/);
+  const res = await bulkPost('Signed Flash Place');
+  const location = res.headers.get('location');
+  assert.match(location, /sig=/);
+  const page = await (await fetch(`${base}${location}`, { headers: { Cookie: cookie } })).text();
+  assert.match(page, /Created 1/);
+  for (const c of await db.listCheckpoints()) if (c.name === 'Signed Flash Place') await db.deleteCheckpoint(c.id);
+});
+
+test('a malformed device cookie under enforcement gives the 403 page, not a 500', async () => {
+  await db.setSetting('require_enrolled_device', '1');
+  try {
+    const res = await fetch(`${base}/walk`, { headers: { Cookie: 'device=%E0%A4%A' } });
+    assert.equal(res.status, 403);
+  } finally {
+    await db.setSetting('require_enrolled_device', '0');
+  }
+});
+
 // Runs last: it replaces every checkpoint.
 test('one-time school setup replaces all checkpoints with the 21, in order', async () => {
   const { SCHOOL_CHECKPOINTS, applySchoolCheckpoints } = require('../src/school-checkpoints');
   assert.equal(SCHOOL_CHECKPOINTS.length, 21);
   await db.addCheckpoint('Old placeholder', '');
   const oldNamed = await db.addCheckpoint('Old real name', '');
+  // A round that ended incomplete before the replace, with its alert.
+  const old = await db.startWalkthrough('BeforeReset');
+  await db.recordScan(old.id, oldNamed.id);
+  await db.finishWalkthrough(old.id, 'incomplete');
+  await db.addAlert(old.id, 'missed_checkpoints', 'Walkthrough time expired. 1 checkpoint(s) NOT scanned:\n• Old placeholder');
   const w = await db.startWalkthrough('Interrupted');
 
   const first = await applySchoolCheckpoints();
@@ -776,4 +909,12 @@ test('one-time school setup replaces all checkpoints with the 21, in order', asy
   const hist = await (await fetch(`${base}/admin/history/${w.id}`, { headers: { Cookie: cookie } })).text();
   assert.match(hist, /cancelled/i);
   assert.doesNotMatch(hist, /Missed \(/);
+
+  // An incomplete round from before the replace shows the names of that time
+  // and the alert actually sent, not today's 20 checkpoints as missed.
+  const oldHist = await (await fetch(`${base}/admin/history/${old.id}`, { headers: { Cookie: cookie } })).text();
+  assert.match(oldHist, /Old real name/);
+  assert.match(oldHist, /Old placeholder/);
+  assert.doesNotMatch(oldHist, /Missed \(20\)/);
+  assert.doesNotMatch(oldHist, new RegExp(SCHOOL_CHECKPOINTS[5]));
 });
