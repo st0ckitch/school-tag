@@ -8,6 +8,7 @@ const { startScheduler, tick } = require('./src/scheduler');
 const { getVapidKeys } = require('./src/notify');
 const { currentDevice } = require('./src/device');
 const { getSetting, addPushSubscription } = require('./src/db');
+const { applySchoolCheckpoints } = require('./src/school-checkpoints');
 
 const app = express();
 app.disable('x-powered-by');
@@ -90,11 +91,24 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`school-tag listening on http://0.0.0.0:${PORT}`);
-    console.log(`Guard page:  /walk    Admin: /admin (default PIN 1234 — change it in Settings!)`);
-  });
-  startScheduler();
+  (async () => {
+    // Finishes before listening so no request sees a half-replaced list.
+    try {
+      const setup = await applySchoolCheckpoints();
+      if (setup.applied) {
+        console.log(
+          `[setup] replaced ${setup.removed} old checkpoint(s) with ${setup.created} school checkpoints`
+        );
+      }
+    } catch (err) {
+      console.error('[setup] school checkpoint setup failed:', err);
+    }
+    app.listen(PORT, () => {
+      console.log(`school-tag listening on http://0.0.0.0:${PORT}`);
+      console.log(`Guard page:  /walk    Admin: /admin (default PIN 1234 — change it in Settings!)`);
+    });
+    startScheduler();
+  })();
 }
 
 module.exports = app;

@@ -16,9 +16,14 @@ const {
   countDevices,
   consumeEnrollmentCode,
   addDevice,
+  isPlaceholderName,
+  isTagCode,
+  linkTag,
+  listLinkCandidates,
 } = require('../db');
 const { tick, closeIncomplete, completeWalkthrough } = require('../scheduler');
 const { requireDevice, deviceCookieHeader } = require('../device');
+const { hasSession } = require('./admin');
 const { esc, page } = require('../html');
 
 const router = express.Router();
@@ -88,27 +93,77 @@ async function progressView(walkthrough, justScanned) {
   `;
 }
 
+// --- linking chips to checkpoints (admin only) -------------------------------
+
+async function linkPage(code, holder, error) {
+  const all = await listLinkCandidates();
+  const linkedCount = all.filter((c) => c.is_linked).length;
+  const candidates = all.filter((c) => c.id !== code);
+  const unlinked = candidates.filter((c) => !c.is_linked);
+  const linked = candidates.filter((c) => c.is_linked);
+  const option = (c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`;
+  const select = candidates.length
+    ? `<select name="checkpoint_id" required>
+         <option value="">— აირჩიეთ / Choose —</option>
+         ${unlinked.length ? `<optgroup label="ჯერ არ არის დაკავშირებული / Not linked yet (${unlinked.length})">${unlinked.map(option).join('')}</optgroup>` : ''}
+         ${linked.length ? `<optgroup label="უკვე დაკავშირებული — ხელახლა / Already linked — re-link">${linked.map(option).join('')}</optgroup>` : ''}
+       </select>
+       <button class="btn full" type="submit">დაკავშირება / Link</button>`
+    : '<p class="bad">წერტილები არ არის. დაამატეთ ადმინ პანელში. / No checkpoints exist yet — add them in the admin panel first.</p>';
+  return page(
+    'Link tag',
+    `<div class="card">
+       <h1>ტეგის დაკავშირება / Link this tag</h1>
+       <div class="sub">კოდი / Code: <code>${esc(code)}</code>${holder ? ` · ახლა / now: ${esc(holder.name)}` : ''}</div>
+       ${error ? `<p class="bad">${esc(error)}</p>` : ''}
+       <p>რომელი წერტილია ეს ტეგი? / Which checkpoint is this chip?</p>
+       <form method="post" action="/t/${esc(code)}/link">${select}</form>
+       <p class="muted" style="font-size:.85rem;margin-top:12px">დაკავშირებულია / Linked so far: ${linkedCount} / ${all.length}</p>
+     </div>`,
+    { lang: 'ka' }
+  );
+}
+
+function unknownTagPage(code) {
+  return page(
+    'Unknown tag',
+    `<div class="card"><h1>უცნობი ტეგი / Unknown tag</h1>
+     <p>ეს ტეგი სისტემაში არ არის რეგისტრირებული. / This tag is not registered in the system.</p>
+     <p class="muted" style="font-size:.85rem">კოდი / Code: <code>${esc(code)}</code><br>
+       ადმინისტრატორი: შედით <a href="/admin">/admin</a>-ში ამ ტელეფონიდან და ხელახლა შეეხეთ ტეგს, რომ დააკავშიროთ. /
+       Administrator: log in at <a href="/admin">/admin</a> on this phone, then tap the tag again to link it.</p></div>`,
+    { lang: 'ka' }
+  );
+}
+
 // The URL written on each NFC tag: /t/<checkpoint id>
 router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
   await tick();
 
-  const checkpoint = await getCheckpoint(req.params.id);
-  if (!checkpoint || !checkpoint.active) {
-    res.status(404).send(
-      page(
-        'Unknown tag',
-        `<div class="card"><h1>უცნობი ტეგი / Unknown tag</h1>
-         <p>ეს ტეგი სისტემაში არ არის რეგისტრირებული. / This tag is not registered in the system.</p></div>`,
-        { lang: 'ka' }
-      )
-    );
+  const code = String(req.params.id).toLowerCase();
+  const checkpoint = await getCheckpoint(code);
+  const isAdmin = await hasSession(req);
+
+  // An admin tapping a chip the system doesn't know (or only knows under a
+  // placeholder name) gets to say which checkpoint it is.
+  if (isAdmin && isTagCode(code) && (!checkpoint || isPlaceholderName(checkpoint.name))) {
+    res.send(await linkPage(code, checkpoint));
     return;
   }
+
+  if (!checkpoint || !checkpoint.active) {
+    res.status(404).send(unknownTagPage(code));
+    return;
+  }
+
+  const relink = isAdmin
+    ? `<p class="no-print" style="text-align:center"><a href="/t/${esc(code)}/link">ადმინი: ტეგის ხელახლა დაკავშირება / Admin: re-link this tag</a></p>`
+    : '';
 
   const active = await getActiveWalkthrough();
   if (active) {
     await recordScan(active.id, checkpoint.id);
-    res.send(page(`✓ ${checkpoint.name}`, await progressView(active, checkpoint), { lang: 'ka' }));
+    res.send(page(`✓ ${checkpoint.name}`, (await progressView(active, checkpoint)) + relink, { lang: 'ka' }));
     return;
   }
 
@@ -126,7 +181,73 @@ router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
            <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
            <button class="btn full" type="submit">შემოვლის დაწყება / Start walkthrough</button>
          </form>
-       </div>`,
+       </div>${relink}`,
+      { lang: 'ka' }
+    )
+  );
+}));
+
+router.get('/t/:id/link', wrap(async (req, res) => {
+  const code = String(req.params.id).toLowerCase();
+  if (!(await hasSession(req))) {
+    res.status(403).send(unknownTagPage(code));
+    return;
+  }
+  if (!isTagCode(code)) {
+    res.status(400).send(unknownTagPage(code));
+    return;
+  }
+  res.send(await linkPage(code, await getCheckpoint(code)));
+}));
+
+router.post('/t/:id/link', wrap(async (req, res) => {
+  const code = String(req.params.id).toLowerCase();
+  if (!(await hasSession(req))) {
+    res.status(403).send(unknownTagPage(code));
+    return;
+  }
+  if (!isTagCode(code)) {
+    res.status(400).send(unknownTagPage(code));
+    return;
+  }
+  const target = await getCheckpoint(String(req.body.checkpoint_id || ''));
+  if (!target || isPlaceholderName(target.name)) {
+    res
+      .status(400)
+      .send(await linkPage(code, await getCheckpoint(code), 'აირჩიეთ წერტილი სიიდან. / Choose a checkpoint from the list.'));
+    return;
+  }
+
+  const linked = await linkTag(code, target.id);
+  const linkedNote = `<div class="card" style="text-align:center">
+       <div class="ok" style="font-weight:700">✓ ტეგი დაკავშირდა / Tag linked</div>
+     </div>`;
+
+  // Linking during a live round also counts as this checkpoint's scan.
+  const active = await getActiveWalkthrough();
+  if (active && linked.active) {
+    await recordScan(active.id, linked.id);
+    res.send(page(`✓ ${linked.name}`, linkedNote + (await progressView(active, linked)), { lang: 'ka' }));
+    return;
+  }
+
+  const all = await listLinkCandidates();
+  const remaining = all.filter((c) => !c.is_linked);
+  res.send(
+    page(
+      'Tag linked',
+      `<div class="card" style="text-align:center">
+         <div class="big ok">✓</div>
+         <h1>${esc(linked.name)}</h1>
+         <p>ტეგი დაკავშირდა. შეეხეთ შემდეგ ტეგს. / Tag linked. Tap the next chip.</p>
+         <p class="muted">დაკავშირებულია / Linked: ${all.length - remaining.length} / ${all.length}</p>
+       </div>
+       ${
+         remaining.length
+           ? `<div class="card"><h2>დარჩენილია დასაკავშირებლად / Still to link (${remaining.length})</h2>
+                <ul class="plain">${remaining.map((c) => `<li>${esc(c.name)}</li>`).join('')}</ul></div>`
+           : '<div class="card" style="text-align:center"><div class="ok" style="font-weight:700">ყველა ტეგი დაკავშირებულია! / All chips linked!</div></div>'
+       }`,
       { lang: 'ka' }
     )
   );

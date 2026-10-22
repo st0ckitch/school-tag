@@ -22,6 +22,9 @@ const {
   listDevices,
   createEnrollmentCode,
   deleteDevice,
+  isPlaceholderName,
+  isTagCode,
+  linkTag,
 } = require('../db');
 const { tick } = require('../scheduler');
 const { sendEmail } = require('../notify');
@@ -164,6 +167,7 @@ const STATUS_PILL = {
   in_progress: '<span class="pill warn">In progress</span>',
   completed: '<span class="pill ok">Completed</span>',
   incomplete: '<span class="pill bad">Incomplete</span>',
+  cancelled: '<span class="pill warn">Cancelled</span>',
 };
 
 // --- dashboard --------------------------------------------------------------
@@ -257,11 +261,18 @@ router.post('/admin/alerts/:id/ack', wrap(requireAdmin), wrap(async (req, res) =
 
 router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const checkpoints = await listCheckpoints();
+  const activeReal = checkpoints.filter((c) => c.active && !isPlaceholderName(c.name));
+  const unlinkedCount = activeReal.filter((c) => !c.is_linked).length;
   res.send(
     adminPage(
       'Checkpoints — School Tag',
       `${nav('/admin/checkpoints')}
        <h1>Checkpoints</h1>
+       <div class="sub">${activeReal.length - unlinkedCount} of ${activeReal.length} linked to a chip${
+         unlinkedCount
+           ? ` · <b>${unlinkedCount} not linked yet</b>: log in here on your phone, then tap each chip — the phone asks which checkpoint it is.`
+           : ''
+       }</div>
        <div class="card">
          <h2>Add checkpoint</h2>
          ${typeof req.query.msg === 'string' && req.query.msg ? `<p class="ok">✓ ${esc(req.query.msg)}</p>` : ''}
@@ -278,9 +289,12 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
        </div>
        <div class="card">
          <h2>Bulk restore</h2>
-         <p class="muted">Paste <b>anything containing the tag links</b> — raw Railway HTTP logs, browser
-            history, a list of URLs — every <code>/t/code</code> found is restored automatically (named
-            "Tag code", rename later). Or use structured lines: <code>tagcode, Name, Location</code>.</p>
+         <p class="muted">One item per line (numbered lists like <code>1. Name, 2. Name</code> work too):</p>
+         <ul class="muted" style="font-size:.9rem;margin-top:0">
+           <li><code>Name</code> — creates a checkpoint; tap its chip later with an admin-logged-in phone to link it.</li>
+           <li><code>tagcode, Name, Location</code> — binds that chip to the checkpoint with that name (or creates it).</li>
+           <li>Anything containing tag links (Railway logs, browser history, URL lists) — every <code>/t/code</code> found is added as "Tag code".</li>
+         </ul>
          <form method="post" action="/admin/checkpoints/bulk">
            <textarea name="bulk" rows="10" style="width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:12px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:0.95rem" placeholder="63f91d85, Main entrance, Ground floor&#10;ece2c3ac, Gym&#10;dfbedd8d, Library, 1st floor"></textarea>
            <button class="btn" type="submit" style="margin-top:10px">Restore all</button>
@@ -300,7 +314,8 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
                    </form>
                  </td>
                  <td><code>/t/${esc(c.id)}</code></td>
-                 <td>${c.active ? '<span class="pill ok">active</span>' : '<span class="pill warn">disabled</span>'}</td>
+                 <td>${c.active ? '<span class="pill ok">active</span>' : '<span class="pill warn">disabled</span>'}
+                   ${c.is_linked ? '<span class="pill ok" title="A chip is bound to this checkpoint">🔗 linked</span>' : '<span class="pill warn" title="No chip bound yet — tap the chip with an admin-logged-in phone">not linked</span>'}</td>
                  <td style="white-space:nowrap">
                    <form method="post" action="/admin/checkpoints/${esc(c.id)}/toggle" style="display:inline"><button class="btn small secondary" type="submit">${c.active ? 'Disable' : 'Enable'}</button></form>
                    <form method="post" action="/admin/checkpoints/${esc(c.id)}/delete" style="display:inline" onsubmit="return confirm('Delete checkpoint ${esc(c.name)}? Its scan history stays, but the tag stops working.')"><button class="btn small danger" type="submit">Delete</button></form>
@@ -331,48 +346,115 @@ router.post('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   res.redirect('/admin/checkpoints');
 }));
 
+// Removes list numbering ("1.", "2)") and invisible characters such as the
+// word joiners phones insert when copying.
+function cleanBulkItem(text) {
+  return text
+    .replace(/[​-‍⁠﻿]/g, '')
+    .replace(/^\s*\d+\s*[.)]\s*/, '')
+    .trim();
+}
+
+function normalizeName(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 router.post('/admin/checkpoints/bulk', wrap(requireAdmin), wrap(async (req, res) => {
   const raw = String(req.body.bulk || '');
-  // Codes to restore, in order of first appearance: code -> {name, location}
-  const wanted = new Map();
+  // In order of first appearance: { code?, name, location, placeholder }
+  const items = [];
+  const seenCodes = new Set();
   const invalid = [];
 
-  // 1) Structured lines: "code, Name, Location" (lines without a tag URL).
+  // 1) Structured lines. A line may also hold several numbered items
+  //    ("1. A, 2. B, 3. C"), which are split apart.
   const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/\/t\//.test(line)) continue; // raw-log/URL lines handled below
-    const parts = line.split(',').map((x) => x.trim());
-    const code = (parts[0] || '').toLowerCase();
-    const name = (parts[1] || '').slice(0, 120);
-    const location = (parts[2] || '').slice(0, 200);
-    if (/^[0-9a-f]{6,16}$/.test(code) && name) {
-      // first occurrence wins; repeated codes in one paste are collapsed
-      if (!wanted.has(code)) wanted.set(code, { name, location });
-    } else {
-      invalid.push(i + 1);
+  lines.forEach((line, i) => {
+    if (/\/t\//.test(line)) return; // raw-log/URL lines handled below
+    for (const piece of line.split(/,\s*(?=\d+\s*[.)]\s)/)) {
+      const item = cleanBulkItem(piece);
+      if (!item) continue;
+      const parts = item.split(',').map((x) => x.trim());
+      const first = parts[0].toLowerCase();
+      if (isTagCode(first)) {
+        if (seenCodes.has(first)) continue; // first occurrence wins
+        seenCodes.add(first);
+        const name = (parts[1] || '').slice(0, 120);
+        items.push({
+          code: first,
+          name: name || `Tag ${first}`,
+          location: (parts[2] || '').slice(0, 200),
+          placeholder: !name,
+        });
+      } else if (/^(?=.*\d)[0-9a-z]{6,16}$/.test(first)) {
+        invalid.push(i + 1); // looks like a mistyped tag code
+      } else {
+        items.push({ name: item.slice(0, 120), location: '', placeholder: false });
+      }
     }
-  }
+  });
 
   // 2) Any text containing tag links (raw Railway logs, browser history,
   //    pasted URLs): auto-extract every /t/<code> occurrence.
   for (const m of raw.matchAll(/\/t\/([0-9a-fA-F]{6,16})\b/g)) {
     const code = m[1].toLowerCase();
-    if (!wanted.has(code)) wanted.set(code, { name: `Tag ${code}`, location: '' });
+    if (seenCodes.has(code)) continue;
+    seenCodes.add(code);
+    items.push({ code, name: `Tag ${code}`, location: '', placeholder: true });
   }
+
+  const byName = new Map();
+  for (const c of await listCheckpoints()) byName.set(normalizeName(c.name), c);
 
   let added = 0;
-  let duplicates = 0;
-  for (const [code, info] of wanted) {
-    const created = await addCheckpoint(info.name, info.location, code);
-    if (created) added++;
-    else duplicates++;
+  let linked = 0;
+  let renamed = 0;
+  let skipped = 0;
+  for (const item of items) {
+    const sameName = item.placeholder ? null : byName.get(normalizeName(item.name));
+
+    if (!item.code) {
+      // Name only: create it unless a checkpoint with that name exists.
+      if (sameName) { skipped++; continue; }
+      const created = await addCheckpoint(item.name, item.location);
+      byName.set(normalizeName(created.name), created);
+      added++;
+      continue;
+    }
+
+    if (sameName) {
+      // "code, Name" for an existing checkpoint binds that chip to it.
+      if (sameName.id === item.code) { skipped++; continue; }
+      const result = await linkTag(item.code, sameName.id);
+      byName.set(normalizeName(result.name), result);
+      linked++;
+      continue;
+    }
+
+    const holder = await getCheckpoint(item.code);
+    if (!holder) {
+      const created = await addCheckpoint(item.name, item.location, item.code);
+      if (!item.placeholder) await linkTag(item.code, item.code);
+      byName.set(normalizeName(created.name), created);
+      added++;
+    } else if (!item.placeholder && isPlaceholderName(holder.name)) {
+      await updateCheckpoint(item.code, { name: item.name, location: item.location || holder.location });
+      await linkTag(item.code, item.code);
+      byName.set(normalizeName(item.name), await getCheckpoint(item.code));
+      renamed++;
+    } else {
+      skipped++;
+    }
   }
 
-  const summary = `Restored ${added} checkpoint(s)` +
-    (duplicates ? `, skipped ${duplicates} already-existing` : '') +
-    (invalid.length ? `; unparsed lines: ${invalid.join(', ')} (use: code, Name, Location)` : '') + '.';
-  res.redirect('/admin/checkpoints?' + (added || !invalid.length ? 'msg=' : 'err=') + encodeURIComponent(summary));
+  const parts = [`Created ${added}`];
+  if (linked) parts.push(`linked ${linked} chip(s) to existing checkpoints`);
+  if (renamed) parts.push(`named ${renamed} placeholder(s)`);
+  if (skipped) parts.push(`skipped ${skipped} already-existing`);
+  const summary = parts.join(', ') +
+    (invalid.length ? `; unparsed lines: ${invalid.join(', ')} (tag codes are 6-16 characters of 0-9 and a-f)` : '') + '.';
+  const changed = added + linked + renamed;
+  res.redirect('/admin/checkpoints?' + (changed || !invalid.length ? 'msg=' : 'err=') + encodeURIComponent(summary));
 }));
 
 router.post('/admin/checkpoints/:id/update', wrap(requireAdmin), wrap(async (req, res) => {

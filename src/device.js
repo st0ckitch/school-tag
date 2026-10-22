@@ -47,8 +47,11 @@ function unauthorizedPage() {
 }
 
 // Middleware for guard routes. A no-op until the admin turns enforcement on.
+// A logged-in admin always passes: they can switch enforcement off anyway,
+// and linking chips must work from whatever phone the admin carries.
 async function requireDevice(req, res, next) {
   if ((await getSetting('require_enrolled_device')) !== '1') return next();
+  if (await require('./routes/admin').hasSession(req)) return next();
   const device = await currentDevice(req);
   if (!device) {
     res.status(403).send(unauthorizedPage());

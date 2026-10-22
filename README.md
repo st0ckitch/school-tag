@@ -56,6 +56,28 @@ The circle chips you have are almost certainly **NTAG213/215/216** NFC stickers
 After that, tapping a tag with any modern iPhone or Android phone pops up the
 checkpoint URL — no app needed for the guards.
 
+### 2a. Linking chips that are already written (tap-to-link)
+
+A chip keeps its code forever, so chips written earlier never need rewriting.
+If the checkpoint list was recreated, or a chip's code is unknown, bind it by
+tapping:
+
+1. On the phone, log in at `/admin` in the browser that opens when you tap a
+   chip (Safari on iPhone, Chrome on Android).
+2. Tap the chip. Because you are logged in as admin, an unknown chip shows
+   **Link this tag** with a list of checkpoints that have no chip yet.
+3. Pick the place → **Link**. Done; the next tap of that chip records scans
+   normally. Repeat for each chip (Admin → Checkpoints shows "N of M linked").
+
+Linking during a live walkthrough also records that checkpoint's scan, so the
+linking round can double as a normal round. To fix a wrong link, tap the chip
+while logged in and use **Admin: re-link this tag** under the scan result.
+Guards without an admin login just see "Unknown tag" and cannot change links.
+
+If you know chip codes already (e.g. from old browser history URLs), paste
+`code, Name` lines into Admin → Checkpoints → Bulk restore — a line whose
+name matches an existing checkpoint links that chip to it without walking.
+
 ### 3. Set up alerts to a device
 
 Admin → **Settings**:

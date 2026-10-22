@@ -91,6 +91,16 @@ const SCHEMA_STATEMENTS = [
 
 async function initSchema() {
   await client.batch(SCHEMA_STATEMENTS, 'write');
+  // 'linked' marks a checkpoint whose code has been bound to a physical chip
+  // through the tap-to-link flow; added after the first release.
+  const info = await client.execute('PRAGMA table_info(checkpoints)');
+  if (!info.rows.some((r) => r.name === 'linked')) {
+    try {
+      await client.execute('ALTER TABLE checkpoints ADD COLUMN linked INTEGER NOT NULL DEFAULT 0');
+    } catch (err) {
+      if (!/duplicate column/i.test(err.message)) throw err;
+    }
+  }
 }
 
 // Lazy init: schema creation runs once, before the first query. A failed
@@ -188,16 +198,27 @@ function newCheckpointId() {
   return crypto.randomBytes(4).toString('hex');
 }
 
+// is_linked: a chip has been bound to the checkpoint, either through the
+// link flow or implicitly by having been scanned.
 async function listCheckpoints(activeOnly = false) {
   await ensureReady();
-  const where = activeOnly ? 'WHERE active = 1' : '';
-  const rs = await client.execute(`SELECT * FROM checkpoints ${where} ORDER BY sort_order, name`);
+  const where = activeOnly ? 'WHERE c.active = 1' : '';
+  const rs = await client.execute(
+    `SELECT c.*,
+            (c.linked = 1 OR EXISTS (SELECT 1 FROM scans s WHERE s.checkpoint_id = c.id)) AS is_linked
+     FROM checkpoints c ${where} ORDER BY c.sort_order, c.name`
+  );
   return rs.rows;
 }
 
 async function getCheckpoint(id) {
   await ensureReady();
-  const rs = await client.execute({ sql: 'SELECT * FROM checkpoints WHERE id = ?', args: [id] });
+  const rs = await client.execute({
+    sql: `SELECT c.*,
+                 (c.linked = 1 OR EXISTS (SELECT 1 FROM scans s WHERE s.checkpoint_id = c.id)) AS is_linked
+          FROM checkpoints c WHERE c.id = ?`,
+    args: [id],
+  });
   return rs.rows[0];
 }
 
@@ -235,6 +256,87 @@ async function updateCheckpoint(id, fields) {
 async function deleteCheckpoint(id) {
   await ensureReady();
   await client.execute({ sql: 'DELETE FROM checkpoints WHERE id = ?', args: [id] });
+}
+
+// Names the restore tools give checkpoints whose real name is not known yet.
+function isPlaceholderName(name) {
+  return /^(checkpoint \d+|tag [0-9a-f]{6,16})$/i.test(String(name || '').trim());
+}
+
+function isTagCode(code) {
+  return /^[0-9a-f]{6,16}$/.test(String(code || ''));
+}
+
+// Binds a physical chip's code to an existing checkpoint by re-keying the
+// checkpoint to that code. Scans already recorded under the code stay with
+// it — they were physically taps of this chip. A placeholder that held the
+// code is removed; a real checkpoint that held it keeps its history under a
+// fresh code and becomes unlinked.
+async function linkTag(code, checkpointId) {
+  await ensureReady();
+  code = String(code || '').toLowerCase();
+  if (!isTagCode(code)) return null;
+  const target = await getCheckpoint(checkpointId);
+  if (!target) return null;
+
+  const statements = [];
+  if (target.id !== code) {
+    const holder = await getCheckpoint(code);
+    if (holder) {
+      if (isPlaceholderName(holder.name)) {
+        statements.push({ sql: 'DELETE FROM checkpoints WHERE id = ?', args: [code] });
+      } else {
+        statements.push({
+          sql: 'UPDATE checkpoints SET id = ?, linked = 0 WHERE id = ?',
+          args: [newCheckpointId(), code],
+        });
+      }
+    }
+    // The target's own history follows it; duplicates within a walkthrough
+    // (both ids scanned in the same round) collapse to one scan.
+    statements.push({
+      sql: 'UPDATE OR IGNORE scans SET checkpoint_id = ? WHERE checkpoint_id = ?',
+      args: [code, target.id],
+    });
+    statements.push({ sql: 'DELETE FROM scans WHERE checkpoint_id = ?', args: [target.id] });
+    statements.push({
+      sql: 'UPDATE checkpoints SET id = ?, linked = 1 WHERE id = ?',
+      args: [code, target.id],
+    });
+  } else {
+    statements.push({ sql: 'UPDATE checkpoints SET linked = 1 WHERE id = ?', args: [code] });
+  }
+  await client.batch(statements, 'write');
+  return getCheckpoint(code);
+}
+
+// Checkpoints offered when linking a chip: real (non-placeholder) active
+// ones, flagged by whether a chip is already bound to them.
+async function listLinkCandidates() {
+  return (await listCheckpoints(true)).filter((c) => !isPlaceholderName(c.name));
+}
+
+// Replaces every checkpoint with the given names, in order, all unlinked.
+// An in-progress walkthrough is cancelled first so it cannot expire against
+// the new list and raise a false missed-checkpoints alert.
+async function replaceAllCheckpoints(names) {
+  await ensureReady();
+  const before = (await client.execute('SELECT COUNT(*) AS n FROM checkpoints')).rows[0].n;
+  const statements = [
+    {
+      sql: "UPDATE walkthroughs SET status = 'cancelled', completed_at = ? WHERE status = 'in_progress'",
+      args: [nowIso()],
+    },
+    'DELETE FROM checkpoints',
+  ];
+  names.forEach((name, i) => {
+    statements.push({
+      sql: 'INSERT INTO checkpoints (id, name, location, sort_order, linked) VALUES (?, ?, ?, ?, 0)',
+      args: [newCheckpointId(), name, '', i + 1],
+    });
+  });
+  await client.batch(statements, 'write');
+  return { removed: before, created: names.length };
 }
 
 // --- walkthroughs ---------------------------------------------------------
@@ -469,6 +571,11 @@ module.exports = {
   addCheckpoint,
   updateCheckpoint,
   deleteCheckpoint,
+  isPlaceholderName,
+  isTagCode,
+  linkTag,
+  listLinkCandidates,
+  replaceAllCheckpoints,
   getActiveWalkthrough,
   startWalkthrough,
   recordScan,
