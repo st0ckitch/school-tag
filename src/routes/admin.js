@@ -22,8 +22,7 @@ const {
   listDevices,
   createEnrollmentCode,
   deleteDevice,
-  isPlaceholderName,
-  isTagCode,
+  markLinked,
   linkTag,
 } = require('../db');
 const { tick } = require('../scheduler');
@@ -45,21 +44,26 @@ async function sign(value) {
   return crypto.createHmac('sha256', await getCookieSecret()).update(value).digest('hex');
 }
 
+// Runs on every chip tap, so a malformed cookie must read as "not logged in"
+// rather than throw (bad percent-encoding, multi-byte MAC characters).
 async function hasSession(req) {
   const raw = (req.headers.cookie || '')
     .split(';')
     .map((c) => c.trim())
     .find((c) => c.startsWith('session='));
   if (!raw) return false;
-  const value = decodeURIComponent(raw.slice('session='.length));
+  let value;
+  try {
+    value = decodeURIComponent(raw.slice('session='.length));
+  } catch (err) {
+    return false;
+  }
   const idx = value.lastIndexOf('.');
   if (idx < 0) return false;
   const token = value.slice(0, idx);
-  const mac = value.slice(idx + 1);
-  const expected = await sign(token);
-  return (
-    mac.length === expected.length && crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(expected))
-  );
+  const mac = Buffer.from(value.slice(idx + 1));
+  const expected = Buffer.from(await sign(token));
+  return mac.length === expected.length && crypto.timingSafeEqual(mac, expected);
 }
 
 async function requireAdmin(req, res, next) {
@@ -261,7 +265,7 @@ router.post('/admin/alerts/:id/ack', wrap(requireAdmin), wrap(async (req, res) =
 
 router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const checkpoints = await listCheckpoints();
-  const activeReal = checkpoints.filter((c) => c.active && !isPlaceholderName(c.name));
+  const activeReal = checkpoints.filter((c) => c.active && !c.placeholder);
   const unlinkedCount = activeReal.filter((c) => !c.is_linked).length;
   res.send(
     adminPage(
@@ -318,7 +322,7 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
                    ${c.is_linked ? '<span class="pill ok" title="A chip is bound to this checkpoint">🔗 linked</span>' : '<span class="pill warn" title="No chip bound yet — tap the chip with an admin-logged-in phone">not linked</span>'}</td>
                  <td style="white-space:nowrap">
                    <form method="post" action="/admin/checkpoints/${esc(c.id)}/toggle" style="display:inline"><button class="btn small secondary" type="submit">${c.active ? 'Disable' : 'Enable'}</button></form>
-                   <form method="post" action="/admin/checkpoints/${esc(c.id)}/delete" style="display:inline" onsubmit="return confirm('Delete checkpoint ${esc(c.name)}? Its scan history stays, but the tag stops working.')"><button class="btn small danger" type="submit">Delete</button></form>
+                   <form method="post" action="/admin/checkpoints/${esc(c.id)}/delete" style="display:inline" data-confirm="${esc(`Delete checkpoint ${c.name}? Its scan history stays, but the tag stops working.`)}" onsubmit="return confirm(this.dataset.confirm)"><button class="btn small danger" type="submit">Delete</button></form>
                  </td>
                </tr>`
              )
@@ -346,115 +350,170 @@ router.post('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   res.redirect('/admin/checkpoints');
 }));
 
-// Removes list numbering ("1.", "2)") and invisible characters such as the
-// word joiners phones insert when copying.
-function cleanBulkItem(text) {
-  return text
-    .replace(/[​-‍⁠﻿]/g, '')
-    .replace(/^\s*\d+\s*[.)]\s*/, '')
-    .trim();
+const INVISIBLE_CHARS = /[​-‍⁠﻿]/g;
+const NUMBERING = /^\d+\s*[.)]\s+/;
+// Separators accepted between a tag code and its name (comma, or a tab from
+// a spreadsheet, semicolon, pipe).
+const CODE_LINE = /^([0-9a-fA-F]{6,16})(?:\s*[,\t;|]\s*(.*))?$/;
+// A URL at the start of a line stands for its code: "URL, Name" = "code, Name".
+const LEADING_URL = /^(?:https?:\/\/[^\s,;|]*)?\/t\/([0-9a-fA-F]{6,16})\b/;
+
+function trimSeparators(text) {
+  return text.replace(/^[\s,;]+|[\s,;]+$/g, '');
 }
 
 function normalizeName(name) {
-  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return trimSeparators(String(name || '')).replace(/\s+/g, ' ').toLowerCase();
+}
+
+function quote(text) {
+  const t = String(text).trim();
+  return `"${t.length > 30 ? `${t.slice(0, 30)}…` : t}"`;
+}
+
+// Splits a paste into items: { code?, name, location, placeholder }.
+// Pastes that contain tag links (logs, browser history, URL lists) never
+// turn their free-text lines into checkpoints — only codes are taken.
+function parseBulk(rawInput) {
+  const raw = String(rawInput || '').replace(INVISIBLE_CHARS, '');
+  const linkMode = /\/t\/[0-9a-fA-F]{6,16}\b/.test(raw);
+  const items = [];
+  const seenCodes = new Set();
+  const problems = [];
+  let ignored = 0;
+
+  const addCode = (code, name, location) => {
+    code = code.toLowerCase();
+    if (seenCodes.has(code)) return; // first occurrence wins
+    seenCodes.add(code);
+    const cleanName = trimSeparators(name || '').slice(0, 120);
+    items.push({
+      code,
+      name: cleanName || `Tag ${code}`,
+      location: trimSeparators(location || '').slice(0, 200),
+      placeholder: !cleanName,
+    });
+  };
+
+  for (const rawLine of raw.split(/\r?\n/)) {
+    let line = rawLine.trim();
+    if (!line) continue;
+    const url = line.match(LEADING_URL);
+    if (url) line = url[1] + line.slice(url[0].length);
+    if (/\/t\//.test(line)) continue; // log line; its codes are extracted below
+
+    // "1. A, 2. B, 3. C" on one line: split only lines that start numbered.
+    const pieces = NUMBERING.test(line) ? line.split(/[,;]\s*(?=\d+\s*[.)]\s)/) : [line];
+    for (const rawPiece of pieces) {
+      const piece = trimSeparators(rawPiece.replace(NUMBERING, ''));
+      if (!piece) continue;
+      const codeLine = piece.match(CODE_LINE);
+      if (codeLine) {
+        const rest = (codeLine[2] || '').split(/\s*[,\t;|]\s*/);
+        addCode(codeLine[1], rest[0], rest.slice(1).filter(Boolean).join(', '));
+      } else if (/^(?=[^\s,]*\d)[0-9a-z]{6,16}\s*[,\t;|]/i.test(piece) || /^[0-9a-f]{6,16}\s+\S/i.test(piece)) {
+        // A mistyped code, or a code separated from its name by a space.
+        if (linkMode) ignored++;
+        else problems.push(quote(piece));
+      } else if (linkMode) {
+        ignored++;
+      } else {
+        items.push({ name: piece.slice(0, 120), location: '', placeholder: false });
+      }
+    }
+  }
+
+  for (const m of raw.matchAll(/\/t\/([0-9a-fA-F]{6,16})\b/g)) addCode(m[1]);
+  return { items, problems, ignored };
+}
+
+async function nameIndex() {
+  const index = new Map();
+  for (const c of await listCheckpoints()) {
+    const key = normalizeName(c.name);
+    if (!index.has(key)) index.set(key, c);
+  }
+  return index;
 }
 
 router.post('/admin/checkpoints/bulk', wrap(requireAdmin), wrap(async (req, res) => {
-  const raw = String(req.body.bulk || '');
-  // In order of first appearance: { code?, name, location, placeholder }
-  const items = [];
-  const seenCodes = new Set();
-  const invalid = [];
+  const { items, problems, ignored } = parseBulk(req.body.bulk);
 
-  // 1) Structured lines. A line may also hold several numbered items
-  //    ("1. A, 2. B, 3. C"), which are split apart.
-  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
-  lines.forEach((line, i) => {
-    if (/\/t\//.test(line)) return; // raw-log/URL lines handled below
-    for (const piece of line.split(/,\s*(?=\d+\s*[.)]\s)/)) {
-      const item = cleanBulkItem(piece);
-      if (!item) continue;
-      const parts = item.split(',').map((x) => x.trim());
-      const first = parts[0].toLowerCase();
-      if (isTagCode(first)) {
-        if (seenCodes.has(first)) continue; // first occurrence wins
-        seenCodes.add(first);
-        const name = (parts[1] || '').slice(0, 120);
-        items.push({
-          code: first,
-          name: name || `Tag ${first}`,
-          location: (parts[2] || '').slice(0, 200),
-          placeholder: !name,
-        });
-      } else if (/^(?=.*\d)[0-9a-z]{6,16}$/.test(first)) {
-        invalid.push(i + 1); // looks like a mistyped tag code
-      } else {
-        items.push({ name: item.slice(0, 120), location: '', placeholder: false });
-      }
-    }
-  });
+  let index = await nameIndex();
+  // Names created or linked by this paste: a second line with the same name
+  // is a different chip, not a link to the checkpoint made a moment ago.
+  const touched = new Set();
+  const counts = { added: 0, linked: 0, renamed: 0, skipped: 0, duplicates: 0 };
+  const displaced = [];
 
-  // 2) Any text containing tag links (raw Railway logs, browser history,
-  //    pasted URLs): auto-extract every /t/<code> occurrence.
-  for (const m of raw.matchAll(/\/t\/([0-9a-fA-F]{6,16})\b/g)) {
-    const code = m[1].toLowerCase();
-    if (seenCodes.has(code)) continue;
-    seenCodes.add(code);
-    items.push({ code, name: `Tag ${code}`, location: '', placeholder: true });
-  }
-
-  const byName = new Map();
-  for (const c of await listCheckpoints()) byName.set(normalizeName(c.name), c);
-
-  let added = 0;
-  let linked = 0;
-  let renamed = 0;
-  let skipped = 0;
   for (const item of items) {
-    const sameName = item.placeholder ? null : byName.get(normalizeName(item.name));
+    const key = item.placeholder ? null : normalizeName(item.name);
 
     if (!item.code) {
-      // Name only: create it unless a checkpoint with that name exists.
-      if (sameName) { skipped++; continue; }
-      const created = await addCheckpoint(item.name, item.location);
-      byName.set(normalizeName(created.name), created);
-      added++;
+      if (touched.has(key)) counts.duplicates++;
+      else if (index.has(key)) counts.skipped++;
+      else {
+        await addCheckpoint(item.name, item.location);
+        counts.added++;
+        touched.add(key);
+        index = await nameIndex();
+      }
       continue;
     }
 
+    const sameName = key && !touched.has(key) ? index.get(key) : null;
     if (sameName) {
-      // "code, Name" for an existing checkpoint binds that chip to it.
-      if (sameName.id === item.code) { skipped++; continue; }
-      const result = await linkTag(item.code, sameName.id);
-      byName.set(normalizeName(result.name), result);
-      linked++;
+      if (sameName.id === item.code) {
+        await markLinked(item.code);
+        counts.skipped++;
+      } else {
+        const holder = await getCheckpoint(item.code);
+        await linkTag(item.code, sameName.id);
+        if (item.location) await updateCheckpoint(item.code, { location: item.location });
+        if (holder && !holder.placeholder) displaced.push(holder.name);
+        counts.linked++;
+      }
+      touched.add(key);
+      index = await nameIndex();
       continue;
     }
 
     const holder = await getCheckpoint(item.code);
     if (!holder) {
-      const created = await addCheckpoint(item.name, item.location, item.code);
-      if (!item.placeholder) await linkTag(item.code, item.code);
-      byName.set(normalizeName(created.name), created);
-      added++;
-    } else if (!item.placeholder && isPlaceholderName(holder.name)) {
-      await updateCheckpoint(item.code, { name: item.name, location: item.location || holder.location });
-      await linkTag(item.code, item.code);
-      byName.set(normalizeName(item.name), await getCheckpoint(item.code));
-      renamed++;
+      await addCheckpoint(item.name, item.location, item.code, { placeholder: item.placeholder });
+      if (!item.placeholder) await markLinked(item.code);
+      counts.added++;
+    } else if (!item.placeholder && holder.placeholder) {
+      await updateCheckpoint(item.code, {
+        name: item.name,
+        location: item.location || holder.location,
+        placeholder: false,
+      });
+      await markLinked(item.code);
+      counts.renamed++;
     } else {
-      skipped++;
+      counts.skipped++;
+      continue;
     }
+    if (key) touched.add(key);
+    index = await nameIndex();
   }
 
-  const parts = [`Created ${added}`];
-  if (linked) parts.push(`linked ${linked} chip(s) to existing checkpoints`);
-  if (renamed) parts.push(`named ${renamed} placeholder(s)`);
-  if (skipped) parts.push(`skipped ${skipped} already-existing`);
-  const summary = parts.join(', ') +
-    (invalid.length ? `; unparsed lines: ${invalid.join(', ')} (tag codes are 6-16 characters of 0-9 and a-f)` : '') + '.';
-  const changed = added + linked + renamed;
-  res.redirect('/admin/checkpoints?' + (changed || !invalid.length ? 'msg=' : 'err=') + encodeURIComponent(summary));
+  const parts = [`Created ${counts.added}`];
+  if (counts.linked) parts.push(`linked ${counts.linked} chip(s) to existing checkpoints`);
+  if (counts.renamed) parts.push(`named ${counts.renamed} placeholder(s)`);
+  if (counts.skipped) parts.push(`skipped ${counts.skipped} already existing`);
+  if (counts.duplicates) parts.push(`ignored ${counts.duplicates} repeated in this paste`);
+  if (ignored) parts.push(`ignored ${ignored} non-tag line(s) of the pasted log/links`);
+  let summary = parts.join(', ') + '.';
+  if (displaced.length) {
+    summary += ` Moved chips away from: ${displaced.slice(0, 5).join(', ')}${displaced.length > 5 ? '…' : ''} (now not linked).`;
+  }
+  if (problems.length) {
+    summary += ` Not understood: ${problems.slice(0, 3).join(', ')}${problems.length > 3 ? ` and ${problems.length - 3} more` : ''} — tag codes are 6-16 characters of 0-9 and a-f, written "code, Name".`;
+  }
+  const changed = counts.added + counts.linked + counts.renamed;
+  res.redirect('/admin/checkpoints?' + (changed || !problems.length ? 'msg=' : 'err=') + encodeURIComponent(summary));
 }));
 
 router.post('/admin/checkpoints/:id/update', wrap(requireAdmin), wrap(async (req, res) => {
@@ -488,6 +547,7 @@ router.get('/admin/tags', wrap(requireAdmin), wrap(async (req, res) => {
       return `<div class="card" style="text-align:center">
         <h2 style="margin-bottom:2px">${esc(c.name)}</h2>
         <div class="muted">${esc(c.location || '')}</div>
+        ${c.is_linked ? '' : '<p class="warn no-print" style="font-size:.85rem">Not linked yet. If you link an already-written chip to this checkpoint (tap it as admin), this code changes. Write or print it only for a brand-new chip.</p>'}
         <img src="${qr}" alt="QR for ${esc(c.name)}" style="margin:8px 0">
         <div><code style="font-size:.8rem">${esc(url)}</code></div>
       </div>`;
@@ -542,7 +602,7 @@ async function devicesPage(req, enrollUrl) {
                <td>${esc(d.name || d.id)}</td>
                <td class="muted">${fmtTime(d.enrolled_at)}</td>
                <td class="muted">${fmtTime(d.last_seen)}</td>
-               <td><form method="post" action="/admin/devices/${esc(d.id)}/delete" onsubmit="return confirm('Remove device ${esc(d.name || d.id)}? It will lose access immediately.')"><button class="btn small danger" type="submit">Remove</button></form></td>
+               <td><form method="post" action="/admin/devices/${esc(d.id)}/delete" data-confirm="${esc(`Remove device ${d.name || d.id}? It will lose access immediately.`)}" onsubmit="return confirm(this.dataset.confirm)"><button class="btn small danger" type="submit">Remove</button></form></td>
              </tr>`
            )
            .join('')}
@@ -639,7 +699,9 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
          ${scans.length === 0 ? '<p class="muted">Nothing scanned.</p>' : ''}
        </div>
        ${
-         w.status !== 'completed' && (missed.length || missing.length)
+         w.status === 'cancelled'
+           ? '<div class="card"><p class="muted">This round was cancelled (for example when the checkpoint list was replaced), so no missed checkpoints are listed.</p></div>'
+           : w.status !== 'completed' && (missed.length || missing.length)
            ? `<div class="card">
                 <h2 class="bad">Missed (${missed.length})</h2>
                 <ul class="plain">${missed.map((c) => `<li>${esc(c.name)}${c.location ? ` <span class="muted">— ${esc(c.location)}</span>` : ''}</li>`).join('')}</ul>

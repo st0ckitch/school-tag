@@ -16,14 +16,15 @@ const {
   countDevices,
   consumeEnrollmentCode,
   addDevice,
-  isPlaceholderName,
   isTagCode,
+  markLinked,
   linkTag,
   listLinkCandidates,
 } = require('../db');
 const { tick, closeIncomplete, completeWalkthrough } = require('../scheduler');
 const { requireDevice, deviceCookieHeader } = require('../device');
 const { hasSession } = require('./admin');
+const { previousNameForCode } = require('../school-checkpoints');
 const { esc, page } = require('../html');
 
 const router = express.Router();
@@ -96,6 +97,7 @@ async function progressView(walkthrough, justScanned) {
 // --- linking chips to checkpoints (admin only) -------------------------------
 
 async function linkPage(code, holder, error) {
+  const previous = await previousNameForCode(code);
   const all = await listLinkCandidates();
   const linkedCount = all.filter((c) => c.is_linked).length;
   const candidates = all.filter((c) => c.id !== code);
@@ -115,6 +117,7 @@ async function linkPage(code, holder, error) {
     `<div class="card">
        <h1>ტეგის დაკავშირება / Link this tag</h1>
        <div class="sub">კოდი / Code: <code>${esc(code)}</code>${holder ? ` · ახლა / now: ${esc(holder.name)}` : ''}</div>
+       ${previous ? `<p class="muted">ადრე ეს ტეგი იყო / Before the reset this chip was: <b>${esc(previous)}</b></p>` : ''}
        ${error ? `<p class="bad">${esc(error)}</p>` : ''}
        <p>რომელი წერტილია ეს ტეგი? / Which checkpoint is this chip?</p>
        <form method="post" action="/t/${esc(code)}/link">${select}</form>
@@ -146,8 +149,22 @@ router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
 
   // An admin tapping a chip the system doesn't know (or only knows under a
   // placeholder name) gets to say which checkpoint it is.
-  if (isAdmin && isTagCode(code) && (!checkpoint || isPlaceholderName(checkpoint.name))) {
+  if (isAdmin && isTagCode(code) && (!checkpoint || checkpoint.placeholder)) {
     res.send(await linkPage(code, checkpoint));
+    return;
+  }
+
+  if (checkpoint && !checkpoint.active && isAdmin) {
+    res.status(404).send(
+      page(
+        'Disabled checkpoint',
+        `<div class="card"><h1>${esc(checkpoint.name)}</h1>
+         <p>ეს ტეგი დაკავშირებულია გამორთულ წერტილთან. ჩართეთ ადმინ პანელში → Checkpoints. /
+            This chip is linked to a disabled checkpoint — enable it in Admin → Checkpoints.</p>
+         <p><a href="/t/${esc(code)}/link">ტეგის ხელახლა დაკავშირება / Re-link this chip</a></p></div>`,
+        { lang: 'ka' }
+      )
+    );
     return;
   }
 
@@ -155,6 +172,9 @@ router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
     res.status(404).send(unknownTagPage(code));
     return;
   }
+
+  // Opening a checkpoint's own URL proves a chip (or printed QR) carries it.
+  if (!checkpoint.linked) await markLinked(checkpoint.id);
 
   const relink = isAdmin
     ? `<p class="no-print" style="text-align:center"><a href="/t/${esc(code)}/link">ადმინი: ტეგის ხელახლა დაკავშირება / Admin: re-link this tag</a></p>`
@@ -211,7 +231,7 @@ router.post('/t/:id/link', wrap(async (req, res) => {
     return;
   }
   const target = await getCheckpoint(String(req.body.checkpoint_id || ''));
-  if (!target || isPlaceholderName(target.name)) {
+  if (!target || target.placeholder) {
     res
       .status(400)
       .send(await linkPage(code, await getCheckpoint(code), 'აირჩიეთ წერტილი სიიდან. / Choose a checkpoint from the list.'));

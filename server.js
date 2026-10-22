@@ -8,13 +8,23 @@ const { startScheduler, tick } = require('./src/scheduler');
 const { getVapidKeys } = require('./src/notify');
 const { currentDevice } = require('./src/device');
 const { getSetting, addPushSubscription } = require('./src/db');
-const { applySchoolCheckpoints } = require('./src/school-checkpoints');
+const { ensureSchoolCheckpoints } = require('./src/school-checkpoints');
 
 const app = express();
 app.disable('x-powered-by');
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Serverless (Vercel) has no startup hook, so the one-time school setup runs
+// before the first request of each cold start instead.
+if (process.env.VERCEL) {
+  app.use((req, res, next) => {
+    ensureSchoolCheckpoints()
+      .catch((err) => console.error('[setup] school checkpoint setup failed:', err))
+      .then(() => next());
+  });
+}
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -94,7 +104,7 @@ if (require.main === module) {
   (async () => {
     // Finishes before listening so no request sees a half-replaced list.
     try {
-      const setup = await applySchoolCheckpoints();
+      const setup = await ensureSchoolCheckpoints();
       if (setup.applied) {
         console.log(
           `[setup] replaced ${setup.removed} old checkpoint(s) with ${setup.created} school checkpoints`

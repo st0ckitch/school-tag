@@ -91,15 +91,34 @@ const SCHEMA_STATEMENTS = [
 
 async function initSchema() {
   await client.batch(SCHEMA_STATEMENTS, 'write');
-  // 'linked' marks a checkpoint whose code has been bound to a physical chip
-  // through the tap-to-link flow; added after the first release.
+  // Columns added after the first release:
+  //  - linked: a physical chip has been bound to the checkpoint's code
+  //  - placeholder: created by a restore tool without a real name; the
+  //    tap-to-link flow may delete it when its chip gets a real checkpoint
   const info = await client.execute('PRAGMA table_info(checkpoints)');
-  if (!info.rows.some((r) => r.name === 'linked')) {
-    try {
-      await client.execute('ALTER TABLE checkpoints ADD COLUMN linked INTEGER NOT NULL DEFAULT 0');
-    } catch (err) {
-      if (!/duplicate column/i.test(err.message)) throw err;
+  const has = (col) => info.rows.some((r) => r.name === col);
+  if (!has('linked')) {
+    await addColumn('ALTER TABLE checkpoints ADD COLUMN linked INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!has('placeholder')) {
+    if (await addColumn('ALTER TABLE checkpoints ADD COLUMN placeholder INTEGER NOT NULL DEFAULT 0')) {
+      // Rows from the earlier restore tools carried their placeholder status
+      // only in the name.
+      await client.execute(
+        "UPDATE checkpoints SET placeholder = 1 WHERE name GLOB 'Checkpoint [0-9]*' OR name GLOB 'Tag [0-9a-f]*'"
+      );
     }
+  }
+}
+
+// Returns false when another process added the column first.
+async function addColumn(sql) {
+  try {
+    await client.execute(sql);
+    return true;
+  } catch (err) {
+    if (/duplicate column/i.test(err.message)) return false;
+    throw err;
   }
 }
 
@@ -224,14 +243,14 @@ async function getCheckpoint(id) {
 
 // customId lets a checkpoint be restored under the exact code already
 // written inside a physical NFC chip; returns null if that code is taken.
-async function addCheckpoint(name, location, customId) {
+async function addCheckpoint(name, location, customId, { placeholder = false } = {}) {
   await ensureReady();
   const id = customId ? String(customId).toLowerCase() : newCheckpointId();
   const maxRs = await client.execute('SELECT COALESCE(MAX(sort_order), 0) AS m FROM checkpoints');
   const max = maxRs.rows[0].m;
   const rs = await client.execute({
-    sql: 'INSERT INTO checkpoints (id, name, location, sort_order) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING',
-    args: [id, name, location || '', max + 1],
+    sql: 'INSERT INTO checkpoints (id, name, location, sort_order, placeholder) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
+    args: [id, name, location || '', max + 1, placeholder ? 1 : 0],
   });
   if (rs.rowsAffected === 0) return null;
   return getCheckpoint(id);
@@ -241,16 +260,23 @@ async function updateCheckpoint(id, fields) {
   await ensureReady();
   const cp = await getCheckpoint(id);
   if (!cp) return null;
+  const pick = (key, fallback) => (fields[key] !== undefined ? fields[key] : fallback);
   await client.execute({
-    sql: 'UPDATE checkpoints SET name = ?, location = ?, active = ? WHERE id = ?',
+    sql: 'UPDATE checkpoints SET name = ?, location = ?, active = ?, placeholder = ? WHERE id = ?',
     args: [
-      fields.name !== undefined ? fields.name : cp.name,
-      fields.location !== undefined ? fields.location : cp.location,
+      pick('name', cp.name),
+      pick('location', cp.location),
       fields.active !== undefined ? (fields.active ? 1 : 0) : cp.active,
+      fields.placeholder !== undefined ? (fields.placeholder ? 1 : 0) : cp.placeholder,
       id,
     ],
   });
   return getCheckpoint(id);
+}
+
+async function markLinked(id) {
+  await ensureReady();
+  await client.execute({ sql: 'UPDATE checkpoints SET linked = 1 WHERE id = ? AND linked = 0', args: [id] });
 }
 
 async function deleteCheckpoint(id) {
@@ -258,7 +284,8 @@ async function deleteCheckpoint(id) {
   await client.execute({ sql: 'DELETE FROM checkpoints WHERE id = ?', args: [id] });
 }
 
-// Names the restore tools give checkpoints whose real name is not known yet.
+// Names the earlier restore tools gave checkpoints whose real name was not
+// known. Only used to read legacy rows; new rows carry the placeholder column.
 function isPlaceholderName(name) {
   return /^(checkpoint \d+|tag [0-9a-f]{6,16})$/i.test(String(name || '').trim());
 }
@@ -268,10 +295,14 @@ function isTagCode(code) {
 }
 
 // Binds a physical chip's code to an existing checkpoint by re-keying the
-// checkpoint to that code. Scans already recorded under the code stay with
-// it — they were physically taps of this chip. A placeholder that held the
-// code is removed; a real checkpoint that held it keeps its history under a
-// fresh code and becomes unlinked.
+// checkpoint to that code. Recorded rounds never lose rows:
+//  - a placeholder that held the code is removed and its scans (taps of
+//    this very chip under a stand-in name) now belong to the target;
+//  - a real checkpoint that held the code moves, with its scans, to a fresh
+//    unlinked code, so past rounds keep showing what was reported then;
+//  - the target's own scans follow it to the code. If the target and a
+//    placeholder were both scanned in the same round, the target's older
+//    row stays under its old id rather than being deleted.
 async function linkTag(code, checkpointId) {
   await ensureReady();
   code = String(code || '').toLowerCase();
@@ -283,24 +314,20 @@ async function linkTag(code, checkpointId) {
   if (target.id !== code) {
     const holder = await getCheckpoint(code);
     if (holder) {
-      if (isPlaceholderName(holder.name)) {
+      if (holder.placeholder) {
         statements.push({ sql: 'DELETE FROM checkpoints WHERE id = ?', args: [code] });
       } else {
-        statements.push({
-          sql: 'UPDATE checkpoints SET id = ?, linked = 0 WHERE id = ?',
-          args: [newCheckpointId(), code],
-        });
+        const fresh = newCheckpointId();
+        statements.push({ sql: 'UPDATE checkpoints SET id = ?, linked = 0 WHERE id = ?', args: [fresh, code] });
+        statements.push({ sql: 'UPDATE scans SET checkpoint_id = ? WHERE checkpoint_id = ?', args: [fresh, code] });
       }
     }
-    // The target's own history follows it; duplicates within a walkthrough
-    // (both ids scanned in the same round) collapse to one scan.
     statements.push({
       sql: 'UPDATE OR IGNORE scans SET checkpoint_id = ? WHERE checkpoint_id = ?',
       args: [code, target.id],
     });
-    statements.push({ sql: 'DELETE FROM scans WHERE checkpoint_id = ?', args: [target.id] });
     statements.push({
-      sql: 'UPDATE checkpoints SET id = ?, linked = 1 WHERE id = ?',
+      sql: 'UPDATE checkpoints SET id = ?, linked = 1, placeholder = 0 WHERE id = ?',
       args: [code, target.id],
     });
   } else {
@@ -313,25 +340,42 @@ async function linkTag(code, checkpointId) {
 // Checkpoints offered when linking a chip: real (non-placeholder) active
 // ones, flagged by whether a chip is already bound to them.
 async function listLinkCandidates() {
-  return (await listCheckpoints(true)).filter((c) => !isPlaceholderName(c.name));
+  return (await listCheckpoints(true)).filter((c) => !c.placeholder);
 }
 
-// Replaces every checkpoint with the given names, in order, all unlinked.
-// An in-progress walkthrough is cancelled first so it cannot expire against
-// the new list and raise a false missed-checkpoints alert.
-async function replaceAllCheckpoints(names) {
+// Replaces every checkpoint with the given names, in order, all unlinked,
+// in one transaction:
+//  - flagKey is inserted first with a plain INSERT, so a second (or
+//    concurrent) run fails on the primary key and rolls back entirely —
+//    the replace and its "done" marker commit together or not at all;
+//  - backupKey keeps a JSON snapshot of the old rows (which code was which
+//    place), the only record of that mapping once they are deleted;
+//  - an in-progress walkthrough is cancelled so it cannot expire against
+//    the new list and raise a false missed-checkpoints alert.
+async function replaceAllCheckpoints(names, { flagKey, backupKey } = {}) {
   await ensureReady();
   const before = (await client.execute('SELECT COUNT(*) AS n FROM checkpoints')).rows[0].n;
-  const statements = [
-    {
-      sql: "UPDATE walkthroughs SET status = 'cancelled', completed_at = ? WHERE status = 'in_progress'",
-      args: [nowIso()],
-    },
-    'DELETE FROM checkpoints',
-  ];
+  const now = nowIso();
+  const statements = [];
+  if (flagKey) {
+    statements.push({ sql: 'INSERT INTO settings (key, value) VALUES (?, ?)', args: [flagKey, now] });
+  }
+  if (backupKey) {
+    statements.push({
+      sql: `INSERT OR REPLACE INTO settings (key, value)
+            SELECT ?, COALESCE(json_group_array(json_object('id', id, 'name', name, 'location', location)), '[]')
+            FROM checkpoints`,
+      args: [backupKey],
+    });
+  }
+  statements.push({
+    sql: "UPDATE walkthroughs SET status = 'cancelled', completed_at = ? WHERE status = 'in_progress'",
+    args: [now],
+  });
+  statements.push('DELETE FROM checkpoints');
   names.forEach((name, i) => {
     statements.push({
-      sql: 'INSERT INTO checkpoints (id, name, location, sort_order, linked) VALUES (?, ?, ?, ?, 0)',
+      sql: 'INSERT INTO checkpoints (id, name, location, sort_order, linked, placeholder) VALUES (?, ?, ?, ?, 0, 0)',
       args: [newCheckpointId(), name, '', i + 1],
     });
   });
@@ -573,6 +617,7 @@ module.exports = {
   deleteCheckpoint,
   isPlaceholderName,
   isTagCode,
+  markLinked,
   linkTag,
   listLinkCandidates,
   replaceAllCheckpoints,

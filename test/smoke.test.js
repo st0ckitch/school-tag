@@ -479,7 +479,7 @@ test('linkTag re-keys a checkpoint, keeps chip scans, and handles holders', asyn
   assert.equal(named.is_linked, 0);
 
   // Placeholder holding the chip code, with a scan recorded under it.
-  await db.addCheckpoint('Tag cafe0001', '', 'cafe0001');
+  await db.addCheckpoint('Tag cafe0001', '', 'cafe0001', { placeholder: true });
   const w = await db.startWalkthrough('LinkGuard');
   await db.recordScan(w.id, 'cafe0001');
 
@@ -618,7 +618,7 @@ test('bulk: names, numbered one-line lists, and code+name linking', async () => 
   assert.equal((await db.listCheckpoints()).length, before);
 
   // "code, Name" for a placeholder holding the code names it in place.
-  await db.addCheckpoint('Tag d00d0002', '', 'd00d0002');
+  await db.addCheckpoint('Tag d00d0002', '', 'd00d0002', { placeholder: true });
   await post('d00d0002, ჭადრაკის ეზო');
   assert.equal((await db.getCheckpoint('d00d0002')).name, 'ჭადრაკის ეზო');
 
@@ -629,11 +629,116 @@ test('bulk: names, numbered one-line lists, and code+name linking', async () => 
   }
 });
 
+test('re-linking swapped chips never deletes scan history', async () => {
+  const lib = await db.addCheckpoint('Swap Library', '');
+  const gym = await db.addCheckpoint('Swap Gym', '');
+  await db.linkTag('aaaa0a01', lib.id);
+  await db.linkTag('bbbb0b02', gym.id);
+  const rounds = [];
+  for (let i = 0; i < 2; i++) {
+    const w = await db.startWalkthrough(`SwapRound${i}`);
+    await db.recordScan(w.id, 'aaaa0a01');
+    await db.recordScan(w.id, 'bbbb0b02');
+    for (const cp of await db.listCheckpoints(true)) await db.recordScan(w.id, cp.id);
+    await db.finishWalkthrough(w.id, 'completed');
+    rounds.push(w.id);
+  }
+  const countRows = async () =>
+    (await db.rawExecute(
+      `SELECT COUNT(*) AS n FROM scans WHERE walkthrough_id IN (${rounds.map(() => '?').join(',')})`,
+      rounds
+    )).rows[0].n;
+  const before = await countRows();
+
+  // The chips were swapped: fix it by re-linking both, the way the link
+  // form does (by each checkpoint's current id).
+  const currentId = async (name) => (await db.listCheckpoints()).find((c) => c.name === name).id;
+  await db.linkTag('aaaa0a01', await currentId('Swap Gym'));
+  await db.linkTag('bbbb0b02', await currentId('Swap Library'));
+  assert.equal(await countRows(), before, 'no scan rows lost');
+  assert.equal((await db.getCheckpoint('aaaa0a01')).name, 'Swap Gym');
+  assert.equal((await db.getCheckpoint('bbbb0b02')).name, 'Swap Library');
+  // Each past round still shows both places scanned.
+  for (const id of rounds) {
+    const names = (await db.getScans(id)).map((x) => x.checkpoint_name);
+    assert.ok(names.includes('Swap Gym') && names.includes('Swap Library'));
+  }
+  await db.deleteCheckpoint('aaaa0a01');
+  await db.deleteCheckpoint('bbbb0b02');
+});
+
+test('bulk chip-swap paste links each name to the right chip', async () => {
+  const cookie = await adminCookie();
+  const a = await db.addCheckpoint('Bulk Gym', '');
+  const b = await db.addCheckpoint('Bulk Library', '');
+  await db.linkTag('aaaa0c01', a.id);
+  await db.linkTag('bbbb0c02', b.id);
+  await fetch(`${base}/admin/checkpoints/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    body: 'bulk=' + encodeURIComponent('bbbb0c02, Bulk Gym\naaaa0c01, Bulk Library'),
+    redirect: 'manual',
+  });
+  assert.equal((await db.getCheckpoint('bbbb0c02')).name, 'Bulk Gym');
+  assert.equal((await db.getCheckpoint('aaaa0c01')).name, 'Bulk Library');
+  await db.deleteCheckpoint('aaaa0c01');
+  await db.deleteCheckpoint('bbbb0c02');
+});
+
+test('bulk: log pastes create no free-text checkpoints; trailing commas are trimmed', async () => {
+  const cookie = await adminCookie();
+  const post = (text) =>
+    fetch(`${base}/admin/checkpoints/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+      body: 'bulk=' + encodeURIComponent(text),
+      redirect: 'manual',
+    });
+  const before = (await db.listCheckpoints()).length;
+  await post(['GET', '/t/e0e0e001', '200', '11ms', "2026-10-05 GET /manifest.webmanifest 304 '+alert(1)+'"].join('\n'));
+  const afterLog = await db.listCheckpoints();
+  assert.equal(afterLog.length, before + 1, 'only the tag code was added');
+  assert.ok(afterLog.some((c) => c.id === 'e0e0e001' && c.placeholder === 1));
+
+  await post('Trailing Comma Place,\nTrailing Comma Place');
+  const names = (await db.listCheckpoints()).map((c) => c.name);
+  assert.ok(names.includes('Trailing Comma Place'));
+  assert.ok(!names.includes('Trailing Comma Place,'));
+  assert.equal(names.filter((n) => n === 'Trailing Comma Place').length, 1);
+
+  // "URL, Name" behaves like "code, Name".
+  await post('https://school-tag-production.up.railway.app/t/e0e0e002, Url Named Place');
+  assert.equal((await db.getCheckpoint('e0e0e002')).name, 'Url Named Place');
+
+  for (const c of await db.listCheckpoints()) {
+    if (['e0e0e001', 'e0e0e002'].includes(c.id) || c.name === 'Trailing Comma Place') await db.deleteCheckpoint(c.id);
+  }
+});
+
+test('checkpoint names cannot inject into the delete confirmation script', async () => {
+  const cookie = await adminCookie();
+  const cp = await db.addCheckpoint("x'+alert(1)+'", '');
+  const html = await (await fetch(`${base}/admin/checkpoints`, { headers: { Cookie: cookie } })).text();
+  assert.doesNotMatch(html, /confirm\('Delete checkpoint/);
+  assert.match(html, /onsubmit="return confirm\(this\.dataset\.confirm\)"/);
+  await db.deleteCheckpoint(cp.id);
+});
+
+test('a malformed session cookie does not break chip taps', async () => {
+  const cp = await db.addCheckpoint('Cookie test place', '');
+  for (const bad of ['session=%E0%A4%A', 'session=admin.1.' + 'é'.repeat(32), 'session=garbage']) {
+    const res = await fetch(`${base}/t/${cp.id}`, { headers: { Cookie: bad } });
+    assert.equal(res.status, 200, `cookie ${bad} must not cause a 500`);
+  }
+  await db.deleteCheckpoint(cp.id);
+});
+
 // Runs last: it replaces every checkpoint.
 test('one-time school setup replaces all checkpoints with the 21, in order', async () => {
   const { SCHOOL_CHECKPOINTS, applySchoolCheckpoints } = require('../src/school-checkpoints');
   assert.equal(SCHOOL_CHECKPOINTS.length, 21);
   await db.addCheckpoint('Old placeholder', '');
+  const oldNamed = await db.addCheckpoint('Old real name', '');
   const w = await db.startWalkthrough('Interrupted');
 
   const first = await applySchoolCheckpoints();
@@ -646,9 +751,29 @@ test('one-time school setup replaces all checkpoints with the 21, in order', asy
   assert.ok(list.every((c) => !c.is_linked), 'all start unlinked');
   assert.equal((await db.getWalkthrough(w.id)).status, 'cancelled', 'no false alert from the old round');
 
+  // The old code -> name mapping is kept and shown while linking.
+  const { previousNameForCode } = require('../src/school-checkpoints');
+  assert.equal(await previousNameForCode(oldNamed.id), 'Old real name');
+  assert.equal(await previousNameForCode('ffffffff'), null);
+
   // Never runs again, so later admin edits survive restarts.
   await db.deleteCheckpoint(list[0].id);
   const second = await applySchoolCheckpoints();
   assert.equal(second.applied, false);
   assert.equal((await db.listCheckpoints()).length, 20);
+
+  // The "done" flag commits with the replace: a run that loses the race is
+  // rolled back entirely instead of wiping the list a second time.
+  await assert.rejects(
+    db.replaceAllCheckpoints(SCHOOL_CHECKPOINTS, { flagKey: 'school_checkpoints_setup_v1' }),
+    /UNIQUE constraint failed/
+  );
+  assert.equal((await db.listCheckpoints()).length, 20, 'rolled back, nothing replaced');
+
+  // A cancelled round's history page explains itself instead of listing
+  // today's checkpoints as missed.
+  const cookie = await adminCookie();
+  const hist = await (await fetch(`${base}/admin/history/${w.id}`, { headers: { Cookie: cookie } })).text();
+  assert.match(hist, /cancelled/i);
+  assert.doesNotMatch(hist, /Missed \(/);
 });
