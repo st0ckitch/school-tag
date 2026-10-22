@@ -110,11 +110,11 @@ if (require.main === module) {
     // Finishes before listening so no request sees a half-replaced list.
     try {
       const setup = await ensureSchoolCheckpoints();
-      if (setup.applied) {
-        console.log(
-          `[setup] replaced ${setup.removed} old checkpoint(s) with ${setup.created} school checkpoints`
-        );
+      if (setup.restored) {
+        console.log(`[setup] restored ${setup.count} checkpoint(s) with their chip codes from the backup`);
       }
+      if (setup.applied) console.log(`[setup] empty checkpoint list filled with ${setup.created} school checkpoints`);
+      if (setup.kept) console.log(`[setup] kept the existing ${setup.kept} checkpoint(s) unchanged`);
     } catch (err) {
       console.error('[setup] school checkpoint setup failed:', err);
     }

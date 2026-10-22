@@ -1,11 +1,17 @@
 'use strict';
 
-// The school's checkpoint list. On the first server start after this was
-// added, every existing checkpoint is replaced by these, in this order. The
-// physical chips are then bound to them by tapping each one with an
-// admin-logged-in phone (see the link flow in routes/guard.js).
+// The school's checkpoint list. It is only ever used to fill an EMPTY
+// database: once checkpoints exist (codes bound to real chips), they are
+// never deleted or replaced by this module.
 
-const { getSetting, replaceAllCheckpoints, isPlaceholderName } = require('./db');
+const {
+  getSetting,
+  setSetting,
+  listCheckpoints,
+  replaceAllCheckpoints,
+  restoreCheckpointsFromBackup,
+  isPlaceholderName,
+} = require('./db');
 
 const SCHOOL_CHECKPOINTS = [
   'კარტინგების წითელი მოედანი',
@@ -33,21 +39,58 @@ const SCHOOL_CHECKPOINTS = [
 
 const SETUP_FLAG = 'school_checkpoints_setup_v1';
 const BACKUP_KEY = 'checkpoints_backup_pre_school_v1';
+const RESTORED_FLAG = 'school_checkpoints_restored_v1';
 
-// Runs once per database: the flag stops it from wiping checkpoints the
-// admin edits or adds later. The flag is written inside the same transaction
-// as the replace, so a lost race or a failed run leaves nothing half-done.
+const isUniqueFlagError = (err) => /UNIQUE constraint failed: settings\.key/i.test(err.message);
+
+// Runs once per database. An empty checkpoint list gets the school's 21;
+// anything else is left exactly as it is. The flag is written in the same
+// transaction as the fill, so a lost race or a failed run changes nothing.
 async function applySchoolCheckpoints() {
   if (await getSetting(SETUP_FLAG)) return { applied: false };
+  const existing = await listCheckpoints();
+  if (existing.length > 0) {
+    await setSetting(SETUP_FLAG, new Date().toISOString());
+    return { applied: false, kept: existing.length };
+  }
   try {
-    const result = await replaceAllCheckpoints(SCHOOL_CHECKPOINTS, {
-      flagKey: SETUP_FLAG,
-      backupKey: BACKUP_KEY,
-    });
+    const result = await replaceAllCheckpoints(SCHOOL_CHECKPOINTS, { flagKey: SETUP_FLAG });
     return { applied: true, ...result };
   } catch (err) {
-    // Another process committed the replace first.
-    if (/UNIQUE constraint failed: settings\.key/i.test(err.message)) return { applied: false };
+    if (isUniqueFlagError(err)) return { applied: false };
+    throw err;
+  }
+}
+
+// An earlier release replaced every checkpoint with the 21 names (all
+// without chips) and kept a backup of the old rows. If that happened and
+// nothing has been linked or changed since, put the old checkpoints — with
+// their real chip codes — back. Runs at most once.
+async function restoreReplacedCheckpoints() {
+  if (await getSetting(RESTORED_FLAG)) return { restored: false };
+  if (!(await getSetting(SETUP_FLAG))) return { restored: false };
+  let backup;
+  try {
+    backup = JSON.parse((await getSetting(BACKUP_KEY)) || 'null');
+  } catch (err) {
+    return { restored: false };
+  }
+  if (!Array.isArray(backup) || !backup.some((r) => r && r.id && r.name)) return { restored: false };
+
+  const current = await listCheckpoints();
+  const untouched =
+    current.length === SCHOOL_CHECKPOINTS.length &&
+    current.every((c, i) => c.name === SCHOOL_CHECKPOINTS[i] && !c.linked && !c.placeholder && !c.location);
+  if (!untouched) return { restored: false };
+
+  try {
+    const count = await restoreCheckpointsFromBackup(
+      backup.filter((r) => r && r.id && r.name),
+      { flagKey: RESTORED_FLAG }
+    );
+    return { restored: true, count };
+  } catch (err) {
+    if (isUniqueFlagError(err)) return { restored: false };
     throw err;
   }
 }
@@ -69,22 +112,30 @@ async function previousNameForCode(code) {
 // When the replace happened and what every old code was called, so history
 // pages of earlier rounds can show the names guards saw at the time.
 async function resetInfo() {
-  const at = await getSetting(SETUP_FLAG);
   const names = new Map();
+  const backup = await getSetting(BACKUP_KEY);
+  // Without a backup no replace ever happened (the list was filled from
+  // empty, or left untouched), so no round predates a reset. After a
+  // restore the old codes and names are current again.
+  if (!backup || (await getSetting(RESTORED_FLAG))) return { at: null, names };
   try {
-    for (const row of JSON.parse((await getSetting(BACKUP_KEY)) || '[]')) {
+    for (const row of JSON.parse(backup)) {
       if (row && row.id) names.set(row.id, row.location ? `${row.name} — ${row.location}` : row.name);
     }
   } catch (err) {
     // an unreadable backup only costs the old names
   }
-  return { at, names };
+  return { at: await getSetting(SETUP_FLAG), names };
 }
 
 // Memoized so the serverless entry point can await it from a middleware.
 let setupPromise = null;
 function ensureSchoolCheckpoints() {
-  setupPromise ??= applySchoolCheckpoints().catch((err) => {
+  setupPromise ??= (async () => {
+    const restore = await restoreReplacedCheckpoints();
+    const setup = await applySchoolCheckpoints();
+    return { ...setup, ...restore };
+  })().catch((err) => {
     setupPromise = null;
     throw err;
   });
@@ -94,6 +145,7 @@ function ensureSchoolCheckpoints() {
 module.exports = {
   SCHOOL_CHECKPOINTS,
   applySchoolCheckpoints,
+  restoreReplacedCheckpoints,
   ensureSchoolCheckpoints,
   previousNameForCode,
   resetInfo,

@@ -97,9 +97,7 @@ async function initSchema() {
   //    tap-to-link flow may delete it when its chip gets a real checkpoint
   const info = await client.execute('PRAGMA table_info(checkpoints)');
   const has = (col) => info.rows.some((r) => r.name === col);
-  if (!has('linked')) {
-    await addColumn('ALTER TABLE checkpoints ADD COLUMN linked INTEGER NOT NULL DEFAULT 0');
-  }
+  const addedLinked = !has('linked') && (await addColumn('ALTER TABLE checkpoints ADD COLUMN linked INTEGER NOT NULL DEFAULT 0'));
   if (!has('placeholder')) {
     if (await addColumn('ALTER TABLE checkpoints ADD COLUMN placeholder INTEGER NOT NULL DEFAULT 0')) {
       // Rows from the earlier restore tools carried their placeholder status
@@ -108,6 +106,11 @@ async function initSchema() {
         "UPDATE checkpoints SET placeholder = 1 WHERE name GLOB 'Checkpoint [0-9]*' OR name GLOB 'Tag [0-9a-f]*'"
       );
     }
+  }
+  if (addedLinked) {
+    // Checkpoints from before this column existed were written to chips from
+    // the tag sheet, so their codes are already bound to physical chips.
+    await client.execute('UPDATE checkpoints SET linked = 1 WHERE placeholder = 0');
   }
 }
 
@@ -338,6 +341,26 @@ async function linkTag(code, checkpointId) {
 // ones, flagged by whether a chip is already bound to them.
 async function listLinkCandidates() {
   return (await listCheckpoints(true)).filter((c) => !c.placeholder);
+}
+
+// Puts checkpoints back exactly as a replaceAllCheckpoints backup recorded
+// them (same codes, names, locations, order), all bound to their chips.
+// flagKey is inserted first with a plain INSERT so this runs at most once.
+async function restoreCheckpointsFromBackup(rows, { flagKey } = {}) {
+  await ensureReady();
+  const statements = [];
+  if (flagKey) {
+    statements.push({ sql: 'INSERT INTO settings (key, value) VALUES (?, ?)', args: [flagKey, nowIso()] });
+  }
+  statements.push('DELETE FROM checkpoints');
+  rows.forEach((row, i) => {
+    statements.push({
+      sql: 'INSERT INTO checkpoints (id, name, location, sort_order, linked, placeholder) VALUES (?, ?, ?, ?, 1, ?)',
+      args: [String(row.id), String(row.name), String(row.location || ''), i + 1, isPlaceholderName(row.name) ? 1 : 0],
+    });
+  });
+  await client.batch(statements, 'write');
+  return rows.length;
 }
 
 // Replaces every checkpoint with the given names, in order, all unlinked,
@@ -627,6 +650,7 @@ module.exports = {
   linkTag,
   listLinkCandidates,
   replaceAllCheckpoints,
+  restoreCheckpointsFromBackup,
   getActiveWalkthrough,
   startWalkthrough,
   recordScan,

@@ -861,60 +861,104 @@ test('a malformed device cookie under enforcement gives the 403 page, not a 500'
   }
 });
 
-// Runs last: it replaces every checkpoint.
-test('one-time school setup replaces all checkpoints with the 21, in order', async () => {
-  const { SCHOOL_CHECKPOINTS, applySchoolCheckpoints } = require('../src/school-checkpoints');
-  assert.equal(SCHOOL_CHECKPOINTS.length, 21);
+// Run last: they rewrite the whole checkpoint list.
+test('school setup keeps an existing checkpoint list untouched', async () => {
+  const { applySchoolCheckpoints } = require('../src/school-checkpoints');
+  await db.addCheckpoint('Existing real place', '', 'e11e0001');
+  const w = await db.startWalkthrough('KeepRound');
+  const before = (await db.listCheckpoints()).map((c) => `${c.id}:${c.name}`);
+
+  const result = await applySchoolCheckpoints();
+  assert.equal(result.applied, false);
+  assert.ok(result.kept >= 1);
+  assert.deepEqual((await db.listCheckpoints()).map((c) => `${c.id}:${c.name}`), before, 'nothing changed');
+  assert.equal((await db.getWalkthrough(w.id)).status, 'in_progress', 'running round not cancelled');
+  assert.ok(await db.getSetting('school_checkpoints_setup_v1'), 'flag set so it never runs again');
+  assert.equal((await applySchoolCheckpoints()).applied, false);
+
+  for (const cp of await db.listCheckpoints(true)) await db.recordScan(w.id, cp.id);
+  await db.finishWalkthrough(w.id, 'completed');
+});
+
+test('after an earlier release replaced the list, the backup restores the chip codes', async () => {
+  const sc = require('../src/school-checkpoints');
+  const { SCHOOL_CHECKPOINTS } = sc;
+  const cookie = await adminCookie();
+
+  // Rebuild the situation the earlier release created on a live database.
+  await db.rawExecute('DELETE FROM checkpoints');
   await db.addCheckpoint('Old placeholder', '');
-  const oldNamed = await db.addCheckpoint('Old real name', '');
-  // A round that ended incomplete before the replace, with its alert.
+  const oldNamed = await db.addCheckpoint('Old real name', 'Old floor', 'abcabc01');
+  await db.addCheckpoint('Second real name', '', 'abcabc02');
   const old = await db.startWalkthrough('BeforeReset');
   await db.recordScan(old.id, oldNamed.id);
   await db.finishWalkthrough(old.id, 'incomplete');
   await db.addAlert(old.id, 'missed_checkpoints', 'Walkthrough time expired. 1 checkpoint(s) NOT scanned:\n• Old placeholder');
   const w = await db.startWalkthrough('Interrupted');
+  await db.rawExecute("DELETE FROM settings WHERE key = 'school_checkpoints_setup_v1'");
+  await db.replaceAllCheckpoints(SCHOOL_CHECKPOINTS, {
+    flagKey: 'school_checkpoints_setup_v1',
+    backupKey: 'checkpoints_backup_pre_school_v1',
+  });
+  assert.deepEqual((await db.listCheckpoints()).map((c) => c.name), SCHOOL_CHECKPOINTS);
+  assert.equal((await db.getWalkthrough(w.id)).status, 'cancelled');
 
-  const first = await applySchoolCheckpoints();
-  assert.equal(first.applied, true);
-  assert.equal(first.created, 21);
-  assert.ok(first.removed >= 1);
-
-  const list = await db.listCheckpoints();
-  assert.deepEqual(list.map((c) => c.name), SCHOOL_CHECKPOINTS);
-  assert.ok(list.every((c) => !c.is_linked), 'all start unlinked');
-  assert.equal((await db.getWalkthrough(w.id)).status, 'cancelled', 'no false alert from the old round');
-
-  // The old code -> name mapping is kept and shown while linking.
-  const { previousNameForCode } = require('../src/school-checkpoints');
-  assert.equal(await previousNameForCode(oldNamed.id), 'Old real name');
-  assert.equal(await previousNameForCode('ffffffff'), null);
-
-  // Never runs again, so later admin edits survive restarts.
-  await db.deleteCheckpoint(list[0].id);
-  const second = await applySchoolCheckpoints();
-  assert.equal(second.applied, false);
-  assert.equal((await db.listCheckpoints()).length, 20);
-
-  // The "done" flag commits with the replace: a run that loses the race is
-  // rolled back entirely instead of wiping the list a second time.
-  await assert.rejects(
-    db.replaceAllCheckpoints(SCHOOL_CHECKPOINTS, { flagKey: 'school_checkpoints_setup_v1' }),
-    /UNIQUE constraint failed/
-  );
-  assert.equal((await db.listCheckpoints()).length, 20, 'rolled back, nothing replaced');
-
-  // A cancelled round's history page explains itself instead of listing
-  // today's checkpoints as missed.
-  const cookie = await adminCookie();
+  // While in that state, history and the link page use the backup.
+  assert.equal(await sc.previousNameForCode('abcabc01'), 'Old real name — Old floor');
+  const oldHist = await (await fetch(`${base}/admin/history/${old.id}`, { headers: { Cookie: cookie } })).text();
+  assert.match(oldHist, /Old real name/);
+  assert.match(oldHist, /Old placeholder/);
+  assert.doesNotMatch(oldHist, new RegExp(SCHOOL_CHECKPOINTS[5]));
   const hist = await (await fetch(`${base}/admin/history/${w.id}`, { headers: { Cookie: cookie } })).text();
   assert.match(hist, /cancelled/i);
   assert.doesNotMatch(hist, /Missed \(/);
 
-  // An incomplete round from before the replace shows the names of that time
-  // and the alert actually sent, not today's 20 checkpoints as missed.
-  const oldHist = await (await fetch(`${base}/admin/history/${old.id}`, { headers: { Cookie: cookie } })).text();
-  assert.match(oldHist, /Old real name/);
-  assert.match(oldHist, /Old placeholder/);
-  assert.doesNotMatch(oldHist, /Missed \(20\)/);
-  assert.doesNotMatch(oldHist, new RegExp(SCHOOL_CHECKPOINTS[5]));
+  // The next start puts the old checkpoints back with their chip codes.
+  const r = await sc.restoreReplacedCheckpoints();
+  assert.equal(r.restored, true);
+  const restored = await db.listCheckpoints();
+  assert.deepEqual(restored.map((c) => c.name), ['Old placeholder', 'Old real name', 'Second real name']);
+  assert.equal((await db.getCheckpoint('abcabc01')).location, 'Old floor');
+  assert.ok(restored.filter((c) => c.name !== 'Old placeholder').every((c) => c.linked === 1));
+  assert.equal((await fetch(`${base}/t/abcabc01`)).status, 200, 'chip works again');
+  assert.equal((await sc.restoreReplacedCheckpoints()).restored, false, 'runs once');
+});
+
+test('no restore once chips were linked to the replaced list', async () => {
+  const sc = require('../src/school-checkpoints');
+  const { SCHOOL_CHECKPOINTS } = sc;
+  await db.rawExecute("DELETE FROM settings WHERE key IN ('school_checkpoints_setup_v1', 'school_checkpoints_restored_v1')");
+  await db.replaceAllCheckpoints(SCHOOL_CHECKPOINTS, {
+    flagKey: 'school_checkpoints_setup_v1',
+    backupKey: 'checkpoints_backup_pre_school_v1',
+  });
+  const first = (await db.listCheckpoints())[0];
+  await db.linkTag('abcabc01', first.id);
+  assert.equal((await sc.restoreReplacedCheckpoints()).restored, false);
+  assert.equal((await db.getCheckpoint('abcabc01')).name, SCHOOL_CHECKPOINTS[0], 'the admin\'s link is kept');
+});
+
+test('an empty checkpoint list is filled with the 21 school checkpoints, once', async () => {
+  const { SCHOOL_CHECKPOINTS, applySchoolCheckpoints } = require('../src/school-checkpoints');
+  assert.equal(SCHOOL_CHECKPOINTS.length, 21);
+  await db.rawExecute('DELETE FROM checkpoints');
+  await db.rawExecute("DELETE FROM settings WHERE key = 'school_checkpoints_setup_v1'");
+
+  const first = await applySchoolCheckpoints();
+  assert.equal(first.applied, true);
+  assert.equal(first.created, 21);
+  const list = await db.listCheckpoints();
+  assert.deepEqual(list.map((c) => c.name), SCHOOL_CHECKPOINTS);
+  assert.ok(list.every((c) => !c.is_linked), 'all start unlinked');
+
+  await db.deleteCheckpoint(list[0].id);
+  assert.equal((await applySchoolCheckpoints()).applied, false, 'never runs again');
+  assert.equal((await db.listCheckpoints()).length, 20);
+
+  // A run that loses the race rolls back entirely.
+  await assert.rejects(
+    db.replaceAllCheckpoints(SCHOOL_CHECKPOINTS, { flagKey: 'school_checkpoints_setup_v1' }),
+    /UNIQUE constraint failed/
+  );
+  assert.equal((await db.listCheckpoints()).length, 20);
 });
