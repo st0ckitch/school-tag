@@ -46,8 +46,14 @@ async function closeIncomplete(walkthrough, reason) {
     (walkthrough.guard_name ? `\nGuard: ${walkthrough.guard_name}` : '');
 
   await addAlert(walkthrough.id, 'missed_checkpoints', message);
-  await sendNotification('⚠️ School security: checkpoints missed', message);
-  const alertEmailResult = await sendEmail('⚠️ School security: checkpoints missed', message);
+  // Push and email go out side by side, so a slow or failing push service
+  // can't hold back the email.
+  const [push, email] = await Promise.allSettled([
+    sendNotification('⚠️ School security: checkpoints missed', message),
+    sendEmail('⚠️ School security: checkpoints missed', message),
+  ]);
+  if (push.status === 'rejected') console.error('[notify] alert push failed:', push.reason);
+  const alertEmailResult = email.status === 'fulfilled' ? email.value : { ok: false, error: String(email.reason) };
   console.log('[email] alert email:', alertEmailResult.ok ? 'sent' : `FAILED — ${alertEmailResult.error}`);
   return missing;
 }

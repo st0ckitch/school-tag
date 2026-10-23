@@ -1068,7 +1068,7 @@ test('settings take several notification emails and refuse a bad one', async () 
     assert.equal(await db.getSetting('notify_email'), 'Mamuka.tsiklauri@bga.ge, artyomananov@gmail.com');
     let page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
     assert.match(page, /value="Mamuka\.tsiklauri@bga\.ge, artyomananov@gmail\.com"/);
-    assert.match(page, /type="email" multiple/);
+    assert.match(page, /id="notify_email" name="notify_email" type="text" inputmode="email"/);
 
     res = await post('/admin/settings', 'ok@example.com, not-an-email');
     assert.equal(await db.getSetting('notify_email'), 'Mamuka.tsiklauri@bga.ge, artyomananov@gmail.com', 'kept as it was');
@@ -1102,5 +1102,78 @@ test('settings take several notification emails and refuse a bad one', async () 
     await db.setSetting('notify_email', '');
     await db.setSetting('brevo_api_key', '');
     await db.setSetting('brevo_from_email', '');
+  }
+});
+
+test('pasted address lists are understood, and typos are named', () => {
+  const { parseRecipients } = require('../src/notify');
+  const nbsp = ' ';
+  const zw = '​';
+  assert.deepEqual(
+    parseRecipients(`Mamuka Tsiklauri <Mamuka.tsiklauri@BGA.ge>; mailto:artyomananov@gmail.com${nbsp}\n${zw}artyomananov@gmail.com,`),
+    { valid: ['Mamuka.tsiklauri@bga.ge', 'artyomananov@gmail.com'], invalid: [] }
+  );
+  assert.deepEqual(parseRecipients('Mamuka.tsiklauri@bga.ge, artyomananov@gmailcom, someone'), {
+    valid: ['Mamuka.tsiklauri@bga.ge'],
+    invalid: ['artyomananov@gmailcom', 'someone'],
+  });
+  assert.deepEqual(parseRecipients(''), { valid: [], invalid: [] });
+});
+
+test('an address Mailchimp Transactional marks invalid is not reported as sent', async () => {
+  const { sendEmail } = require('../src/notify');
+  await db.setSetting('notify_email', 'a@example.com, b@example.com');
+  await db.setSetting('mailchimp_api_key', 'md-test');
+  await db.setSetting('mailchimp_from_email', 'security@example.com');
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (!String(url).includes('mandrillapp.com')) return realFetch(url, opts);
+    const to = JSON.parse(opts.body).message.to[0].email;
+    return new Response(JSON.stringify([{ email: to, status: to === 'b@example.com' ? 'invalid' : 'sent' }]), { status: 200 });
+  };
+  try {
+    const result = await sendEmail('x', 'y');
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.sent, ['a@example.com']);
+    assert.match(result.error, /not sent to b@example\.com — invalid/);
+  } finally {
+    global.fetch = realFetch;
+    await db.setSetting('notify_email', '');
+    await db.setSetting('mailchimp_api_key', '');
+    await db.setSetting('mailchimp_from_email', '');
+  }
+});
+
+test('a hanging push service does not hold back the missed-checkpoints email', async () => {
+  const { closeIncomplete } = require('../src/scheduler');
+  const net = require('node:net');
+  // Accepts connections and never answers, like a stuck push endpoint.
+  const sockets = [];
+  const silent = net.createServer((s) => sockets.push(s)).listen(0);
+  await new Promise((r) => silent.once('listening', r));
+  const endpoint = `https://127.0.0.1:${silent.address().port}/push/stuck`;
+  await db.addPushSubscription(endpoint, 'BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM', 'tBHItJI5svbpez7KI4CCXg', 'stuck');
+  try {
+    await withBrevo('a@example.com, b@example.com', async () => {
+      const brevo = stubBrevo();
+      try {
+        const w = await db.startWalkthrough('PushGuard');
+        const started = Date.now();
+        let finished = false;
+        const closing = closeIncomplete(w, 'finished early by guard').then(() => (finished = true));
+        // The email goes out right away, while the push is still waiting.
+        while (brevo.captured.length < 2 && Date.now() - started < 3000) await new Promise((r) => setTimeout(r, 20));
+        assert.equal(brevo.captured.length, 2, 'both alert emails sent without waiting for push');
+        assert.equal(finished, false, 'the push was indeed still hanging');
+        await closing;
+        assert.ok(Date.now() - started < 7000, `the push gives up after its timeout (took ${Date.now() - started} ms)`);
+      } finally {
+        brevo.restore();
+      }
+    });
+  } finally {
+    await db.deletePushSubscription(endpoint);
+    for (const s of sockets) s.destroy();
+    silent.close();
   }
 });

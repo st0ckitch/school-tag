@@ -93,9 +93,10 @@ Admin → **Settings**:
   `myschool-security-x7k2`, and enter the same topic here.
 - **Webhook URL** — optionally POST alerts as JSON to anything else
   (Slack, Telegram bot relay, an in-house system).
-- **Email notifications (Mailchimp)** — a summary email when a walkthrough is
-  completed and an alert email when checkpoints are missed, sent to the address
-  you enter. Requires a **Mailchimp Transactional** (Mandrill) API key — create
+- **Email notifications** — a summary email when a walkthrough is
+  completed and an alert email when checkpoints are missed, sent to every
+  address you enter (separate several with commas; each gets its own copy).
+  One way to send them: a **Mailchimp Transactional** (Mandrill) API key — create
   one in your Mailchimp account under Automations → Transactional Email; the
   From address must be on a domain you verified there. A regular Mailchimp
   Marketing key (…-usN) cannot send these emails and is rejected with an

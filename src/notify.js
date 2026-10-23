@@ -1,5 +1,6 @@
 'use strict';
 
+const { domainToASCII } = require('node:url');
 const webpush = require('web-push');
 const { getSetting, setSetting, listPushSubscriptions, deletePushSubscription } = require('./db');
 
@@ -97,16 +98,35 @@ async function sendEmail(subject, text) {
 }
 
 // The notification addresses: one or more, separated by commas, semicolons,
-// spaces or new lines. Repeats (in any letter case) count once.
-const EMAIL_RE = /^[^\s@,;<>()"]+@[^\s@,;<>()"]+\.[^\s@,;<>()".]+$/;
+// spaces or new lines. "Name <address>" and "mailto:" as pasted from mail
+// apps are understood; repeats (in any letter case) count once.
+const LOCAL_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+$/;
+const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+function normalizeAddress(token) {
+  const address = token.replace(/^mailto:/i, '');
+  const at = address.lastIndexOf('@');
+  if (at < 1) return null;
+  const local = address.slice(0, at);
+  const domain = domainToASCII(address.slice(at + 1));
+  return LOCAL_RE.test(local) && DOMAIN_RE.test(domain) ? `${local}@${domain}` : null;
+}
+
 function parseRecipients(value) {
+  const text = String(value || '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '') // invisible characters from copy-paste
+    .replace(/[^,;<>\n]*<([^<>]*)>/g, ' $1 '); // "Name <address>" → address
   const valid = [];
   const invalid = [];
   const seen = new Set();
-  for (const part of String(value || '').split(/[\s,;]+/)) {
-    if (!part || seen.has(part.toLowerCase())) continue;
-    seen.add(part.toLowerCase());
-    (EMAIL_RE.test(part) ? valid : invalid).push(part);
+  for (const token of text.split(/[\s,;]+/)) {
+    if (!token) continue;
+    const address = normalizeAddress(token);
+    const key = (address || token).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (address) valid.push(address);
+    else invalid.push(token);
   }
   return { valid, invalid };
 }
@@ -160,9 +180,9 @@ async function sendViaMandrill(to, apiKey, subject, text) {
       return { ok: false, error: reason };
     }
     const first = Array.isArray(body) ? body[0] : null;
-    if (first && first.status === 'rejected') {
-      console.error('[notify] mailchimp email rejected:', first.reject_reason);
-      return { ok: false, error: `rejected: ${first.reject_reason}` };
+    if (first && !['sent', 'queued', 'scheduled'].includes(first.status)) {
+      console.error('[notify] mailchimp email not accepted:', first.status, first.reject_reason);
+      return { ok: false, error: first.reject_reason ? `${first.status}: ${first.reject_reason}` : String(first.status) };
     }
     console.log('[email] Mailchimp sent OK:', first && first.status);
     return { ok: true };
@@ -236,6 +256,7 @@ async function sendViaSmtp(to, user, pass, subject, text) {
 
 // Native push to every subscribed phone (installed app / APK). Dead
 // subscriptions (uninstalled app, revoked permission) are pruned.
+const PUSH_TIMEOUT_MS = 5000;
 async function sendWebPush(title, message) {
   const subs = await listPushSubscriptions();
   if (subs.length === 0) return { channel: 'webpush', ok: true, sent: 0 };
@@ -243,22 +264,31 @@ async function sendWebPush(title, message) {
   const subject = (await getSetting('base_url')) || 'https://github.com/st0ckitch/school-tag';
   const payload = JSON.stringify({ title, body: message, url: '/admin' });
   let sent = 0;
-  for (const sub of subs) {
-    try {
-      await webpush.sendNotification(
-        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-        payload,
-        { vapidDetails: { subject, publicKey, privateKey }, TTL: 3600 }
-      );
-      sent++;
-    } catch (err) {
-      if (err.statusCode === 404 || err.statusCode === 410) {
-        await deletePushSubscription(sub.endpoint);
-      } else {
-        console.error('[notify] webpush delivery failed:', err.statusCode || err.message);
+  // All phones at once, each bounded, so one unresponsive push service
+  // can't hold up the others (or the guard's Finish, which waits for this).
+  await Promise.all(
+    subs.map(async (sub) => {
+      try {
+        // web-push's own timeout is per socket wait and can add up, so cap
+        // the whole delivery as well.
+        await Promise.race([
+          webpush.sendNotification(
+            { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+            payload,
+            { vapidDetails: { subject, publicKey, privateKey }, TTL: 3600, timeout: PUSH_TIMEOUT_MS }
+          ),
+          new Promise((resolve, reject) => setTimeout(() => reject(new Error('timed out')), PUSH_TIMEOUT_MS).unref()),
+        ]);
+        sent++;
+      } catch (err) {
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          await deletePushSubscription(sub.endpoint);
+        } else {
+          console.error('[notify] webpush delivery failed:', err.statusCode || err.message);
+        }
       }
-    }
-  }
+    })
+  );
   return { channel: 'webpush', ok: true, sent };
 }
 

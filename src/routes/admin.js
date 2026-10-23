@@ -874,13 +874,13 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <label for="webhook_url">Webhook URL (optional) — alerts are also POSTed here as JSON</label>
            <input id="webhook_url" name="webhook_url" value="${esc(webhookUrl)}" placeholder="https://...">
          </div>
-         <div class="card">
-           <h2>Email notifications (Mailchimp)</h2>
-           <p class="muted">A summary email is sent when a walkthrough is <b>completed</b>, and an alert email when checkpoints are <b>missed</b>. Requires a <b>Mailchimp Transactional</b> (Mandrill) API key — regular Mailchimp campaign keys cannot send single emails.</p>
-           ${emailTest ? (emailTest.startsWith('ok:') ? `<p class="ok">✓ Test email sent to ${esc(emailTest.slice(3))} — check the inbox (and the spam folder).</p>` : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
+         <div class="card" id="email-settings">
+           <h2>Email notifications</h2>
+           <p class="muted">A summary email is sent when a walkthrough is <b>completed</b>, and an alert email when checkpoints are <b>missed</b>. Fill in one way of sending below: Mailchimp Transactional, Brevo or SMTP.</p>
+           ${emailTest ? (emailTest === 'ok' || emailTest.startsWith('ok:') ? `<p class="ok">✓ Test email sent${emailTest.length > 3 ? ` to ${esc(emailTest.slice(3))}` : ''} — check the inbox (and the spam folder).</p>` : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
            ${settingsErr ? `<p class="bad">✕ ${esc(settingsErr)}</p>` : ''}
            <label for="notify_email">Send notifications to these emails — separate several with commas</label>
-           <input id="notify_email" name="notify_email" type="email" multiple value="${esc(notifyEmail)}" placeholder="director@myschool.ge, deputy@myschool.ge">
+           <input id="notify_email" name="notify_email" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(notifyEmail)}" placeholder="director@myschool.ge, deputy@myschool.ge">
            <label for="mailchimp_api_key">Mailchimp Transactional API key</label>
            <input id="mailchimp_api_key" name="mailchimp_api_key" type="password" value="${esc(mailchimpApiKey)}" placeholder="md-...">
            <label for="mailchimp_from_email">From address (must be on a domain verified in Mailchimp Transactional)</label>
@@ -958,21 +958,20 @@ async function saveSettings(req) {
 // the fields is exactly what gets tested.
 router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, res) => {
   const saveError = await saveSettings(req);
-  if (saveError) return res.redirect(await flashUrl('/admin/settings', 'email_test', saveError));
+  if (saveError) return res.redirect((await flashUrl('/admin/settings', 'email_test', saveError)) + '#email-settings');
   console.log('[email] test email requested from admin settings');
   const result = await sendEmail(
     'School Tag: test email',
     'This is a test email from your School Tag admin settings. If you can read this, email notifications are working.'
   );
   console.log('[email] test result:', result);
-  res.redirect(
-    await flashUrl('/admin/settings', 'email_test', result.ok ? `ok:${result.sent.join(', ')}` : result.error || 'failed')
-  );
+  const flash = await flashUrl('/admin/settings', 'email_test', result.ok ? `ok:${result.sent.join(', ')}` : result.error || 'failed');
+  res.redirect(flash + '#email-settings');
 }));
 
 router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const saveError = await saveSettings(req);
-  res.redirect(saveError ? await flashUrl('/admin/settings', 'settings_err', saveError) : '/admin/settings');
+  res.redirect(saveError ? (await flashUrl('/admin/settings', 'settings_err', saveError)) + '#email-settings' : '/admin/settings');
 }));
 
 // --- JSON state (for integrations / monitoring) ----------------------------
