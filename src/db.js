@@ -578,6 +578,11 @@ async function acknowledgeAlert(id) {
   await client.execute({ sql: 'UPDATE alerts SET acknowledged = 1 WHERE id = ?', args: [id] });
 }
 
+async function acknowledgeAllAlerts() {
+  await ensureReady();
+  await client.execute('UPDATE alerts SET acknowledged = 1 WHERE acknowledged = 0');
+}
+
 // --- devices (two-phone access limit) --------------------------------------
 
 function sha256(value) {
@@ -716,6 +721,7 @@ module.exports = {
   unacknowledgedAlerts,
   alertsForWalkthrough,
   acknowledgeAlert,
+  acknowledgeAllAlerts,
   listDevices,
   countDevices,
   createEnrollmentCode,

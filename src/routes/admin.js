@@ -22,6 +22,7 @@ const {
   getWalkthrough,
   unacknowledgedAlerts,
   acknowledgeAlert,
+  acknowledgeAllAlerts,
   listDevices,
   createEnrollmentCode,
   deleteDevice,
@@ -32,7 +33,7 @@ const {
 const { tick } = require('../scheduler');
 const { sendEmail, lastEmailResult, emailLog, parseRecipients } = require('../notify');
 const { resetInfo } = require('../school-checkpoints');
-const { esc, page, icon, ring, place } = require('../html');
+const { esc, page, icon, ring, place, ka } = require('../html');
 const { areaChart, sparkline } = require('../charts');
 const { testEmail } = require('../email-template');
 
@@ -172,6 +173,8 @@ const dayKey = (t) =>
 // A day key ("2026-10-23") at local noon, for labels.
 const dayLabel = (key, opts) => new Date(`${key}T12:00:00Z`).toLocaleDateString('en-GB', { timeZone: TZ, ...opts });
 
+const fmtClock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+
 // "23 Oct, 11:53" — compact, for tables.
 const fmtShort = (iso) =>
   new Date(iso).toLocaleString('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -191,14 +194,15 @@ function timeAgo(iso) {
 
 // Change against the previous period: arrow + size, green when it moved the
 // good way, red when the bad way, gray when either way is fine.
-function delta(cur, prev, { goodUp = true, unit = '', digits = 0, note = 'vs previous 7 days' } = {}) {
+function delta(cur, prev, { goodUp = true, unit = '', digits = 0, note = 'vs last week' } = {}) {
   if (cur === null || prev === null) return `<span class="delta-note" style="margin:0">${prev === null ? 'No earlier data yet' : ''}</span>`;
   const d = cur - prev;
   const shown = Math.abs(d).toFixed(digits);
   if (Number(shown) === 0) return `<span class="delta flat">No change</span><span class="delta-note">${note}</span>`;
   const up = d > 0;
   const tone = goodUp === null ? 'flat' : up === goodUp ? 'good' : 'bad';
-  return `<span class="delta ${tone}">${icon(up ? 'arrowUp' : 'arrowDown')}${shown}${unit}</span><span class="delta-note">${note}</span>`;
+  const spoken = `${up ? 'up' : 'down'}${tone === 'good' ? ', better' : tone === 'bad' ? ', worse' : ''}`;
+  return `<span class="delta ${tone}">${icon(up ? 'arrowUp' : 'arrowDown')}${up ? '+' : '−'}${shown}${unit}<span class="sr-only"> (${spoken})</span></span><span class="delta-note">${note}</span>`;
 }
 
 const statTile = ({ label, value, deltaHtml, tile, ic }) => `
@@ -212,6 +216,26 @@ const miniCard = ({ label, value, deltaHtml, spark }) => `
     <div style="min-width:0"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${deltaHtml}</div>
     ${spark}
   </div>`;
+
+// Rounds as table rows: the start time links to the round's page.
+function roundsTable(walks) {
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>Round</th><th class="hide-sm">Guard</th><th>Scanned</th><th class="num hide-sm">Time</th><th>Status</th></tr></thead>
+    <tbody>${walks
+      .map((w) => {
+        const pct = w.total_checkpoints ? Math.round((100 * Math.min(w.scanned_count, w.total_checkpoints)) / w.total_checkpoints) : 0;
+        const took = w.completed_at ? fmtDuration(Date.parse(w.completed_at) - Date.parse(w.started_at)) : '—';
+        return `<tr>
+          <td style="white-space:nowrap"><a href="/admin/history/${encodeURIComponent(w.id)}">${fmtShort(w.started_at)}</a></td>
+          <td class="hide-sm">${ka(w.guard_name || '—')}</td>
+          <td><div style="display:flex;align-items:center;gap:8px"><span class="num">${w.scanned_count}/${w.total_checkpoints}</span><div class="bar-track hide-sm" style="flex:1;max-width:90px"><div style="width:${pct}%"></div></div></div></td>
+          <td class="num hide-sm">${took}</td>
+          <td>${STATUS_PILL[w.status] || esc(w.status)}</td>
+        </tr>`;
+      })
+      .join('')}</tbody>
+  </table></div>`;
+}
 
 router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
   await tick();
@@ -329,7 +353,7 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
       label: 'Checkpoints covered',
       value: covNow === null ? '—' : `${Math.round(covNow)}%`,
       deltaHtml: delta(covNow === null ? null : Math.round(covNow), coverage(lastWeek) === null ? null : Math.round(coverage(lastWeek)), { unit: ' pts' }),
-      spark: sparkline(days.map((d) => coverage(walksByDay.get(d)))),
+      spark: sparkline(days.map((d) => coverage(walksByDay.get(d))), 7, [0, 100]),
     }),
   ];
 
@@ -343,11 +367,11 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
       : 'No time limit';
     liveCard = `
       <div class="card">
-        <div class="card-head"><h2>Live round ${STATUS_PILL.in_progress}</h2><a class="btn secondary small" href="/walk">Open guard view</a></div>
+        <div class="card-head"><h2>Live round ${STATUS_PILL.in_progress}</h2><a class="btn secondary small" href="/admin/history/${encodeURIComponent(active.id)}">Details</a></div>
         <div class="ring-card">
           ${ring(scans.length, total, 'scanned')}
           <div style="min-width:0">
-            <div class="stat-label">Guard</div><div style="font-weight:700;margin-bottom:8px">${esc(active.guard_name || '—')}</div>
+            <div class="stat-label">Guard</div><div style="font-weight:700;margin-bottom:8px">${ka(active.guard_name || '—')}</div>
             <div class="muted" style="font-size:.88rem">Started ${timeAgo(active.started_at)} · ${timeInfo}</div>
             ${scans.length ? `<div class="muted" style="font-size:.88rem">Last scan ${timeAgo(scans[scans.length - 1].scanned_at)}</div>` : ''}
           </div>
@@ -355,53 +379,42 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
         ${
           missing.length
             ? `<h3 style="margin-top:18px">Still to scan (${missing.length})</h3>
-               <div class="row" style="gap:6px">${missing.map((c) => `<span class="pill" style="flex:none">${esc(c.name)}</span>`).join('')}</div>`
+               <div class="row" style="gap:6px">${missing.map((c) => `<span class="pill" style="flex:none">${ka(c.name)}</span>`).join('')}</div>`
             : '<p class="ok" style="margin-top:14px;font-weight:700">All checkpoints scanned — waiting for the guard to finish.</p>'
         }
       </div>`;
   }
 
+  // Newest three alerts, one line each; the missed list opens on demand.
   const alertsCard = alerts.length
     ? `<div class="card" id="alerts">
-        <div class="card-head"><h2>Alerts <span class="pill bad">${icon('alert')}${alerts.length} new</span></h2></div>
+        <div class="card-head">
+          <h2>Alerts <span class="pill bad">${icon('alert')}${alerts.length} new</span></h2>
+          <form method="post" action="/admin/alerts/ack-all" class="no-print"><button class="btn ghost small" type="submit">Acknowledge all</button></form>
+        </div>
         <ul class="plain">${alerts
-          .map(
-            (a) => `<li class="wrap" style="align-items:flex-start">
+          .slice(0, 3)
+          .map((a) => {
+            const [first, ...rest] = String(a.message).split('\n');
+            return `<li class="wrap" style="align-items:flex-start">
               <span class="tile pink sm">${icon('alert')}</span>
               <div style="flex:1;min-width:0">
-                <div style="white-space:pre-line">${esc(a.message)}</div>
-                <div class="muted" style="font-size:.8rem;margin-top:2px">${fmtTime(a.created_at)}</div>
+                <div style="font-weight:600">${ka(first)}</div>
+                <div class="muted" style="font-size:.8rem">${fmtTime(a.created_at)}</div>
+                ${rest.length ? `<details class="cp-edit"><summary>Show checkpoints</summary><div style="white-space:pre-line;margin-top:6px">${ka(rest.join('\n'))}</div></details>` : ''}
               </div>
               <form method="post" action="/admin/alerts/${a.id}/ack"><button class="btn small secondary" type="submit">Acknowledge</button></form>
-            </li>`
-          )
+            </li>`;
+          })
           .join('')}</ul>
+        ${alerts.length > 3 ? `<p class="muted" style="margin:10px 0 0;font-size:.85rem">+${alerts.length - 3} older alert${alerts.length - 3 === 1 ? '' : 's'} — see History, or acknowledge all.</p>` : ''}
       </div>`
     : '';
 
   const recentCard = `
     <div class="card">
       <div class="card-head"><h2>Recent rounds</h2><a href="/admin/history" class="btn ghost small">View all</a></div>
-      ${
-        recent.length
-          ? `<div class="table-wrap"><table>
-              <thead><tr><th>Round</th><th class="hide-sm">Guard</th><th>Checkpoints</th><th class="hide-sm">Time</th><th>Status</th></tr></thead>
-              <tbody>${recent
-                .map((w) => {
-                  const pct = w.total_checkpoints ? Math.round((100 * Math.min(w.scanned_count, w.total_checkpoints)) / w.total_checkpoints) : 0;
-                  const took = w.completed_at ? fmtDuration(Date.parse(w.completed_at) - Date.parse(w.started_at)) : '—';
-                  return `<tr>
-                    <td style="white-space:nowrap"><a href="/admin/history/${encodeURIComponent(w.id)}">${fmtShort(w.started_at)}</a></td>
-                    <td class="hide-sm">${esc(w.guard_name || '—')}</td>
-                    <td><div style="display:flex;align-items:center;gap:8px"><span class="num">${w.scanned_count}/${w.total_checkpoints}</span><div class="bar-track hide-sm" style="flex:1;max-width:90px"><div style="width:${pct}%"></div></div></div></td>
-                    <td class="num hide-sm">${took}</td>
-                    <td>${STATUS_PILL[w.status] || esc(w.status)}</td>
-                  </tr>`;
-                })
-                .join('')}</tbody>
-            </table></div>`
-          : '<p class="muted">No rounds yet. A round starts when a guard scans any tag.</p>'
-      }
+      ${recent.length ? roundsTable(recent) : '<p class="muted">No rounds yet. A round starts when a guard scans any tag.</p>'}
     </div>`;
 
   const topMissed = Math.max(1, ...missedTop.map((c) => c.missed));
@@ -412,8 +425,8 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
         missedTop.length
           ? `<ul class="plain">${missedTop
               .map(
-                (c) => `<li>
-                  <span style="min-width:0;flex:1">${esc(c.name)}</span>
+                (c) => `<li class="bars">
+                  <span style="min-width:0;flex:1">${ka(c.name)}</span>
                   <div class="bar-track" style="width:22%;flex:none"><div style="width:${Math.round((100 * c.missed) / topMissed)}%"></div></div>
                   <span class="num" style="width:5.5em;text-align:right;font-weight:700">${c.missed} round${c.missed === 1 ? '' : 's'}</span>
                 </li>`
@@ -428,15 +441,14 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
       'Dashboard — School Tag',
       `<div class="page-head">
          <div><h1>School security dashboard</h1>
-           <div class="sub">${new Date(now).toLocaleDateString('en-GB', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' })} · ${checkpoints.length} active checkpoints</div></div>
+           <div class="sub">${new Date(now).toLocaleDateString('en-GB', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' })} · ${checkpoints.length} active checkpoints · ${active ? 'round in progress' : 'no round running'} · updates automatically</div></div>
          <div class="row no-print" style="flex:none">
            <button class="btn secondary small" data-label="Admin device" data-done="Alerts enabled on this device" data-denied="Blocked in browser settings" onclick="stEnablePush(this)">${icon('bell')}Enable alerts here</button>
            <a class="btn small" href="/walk">${icon('route')}Guard app</a>
          </div>
        </div>
-       ${alertsCard}
-       ${liveCard}
        <div class="grid kpis">${kpis.join('')}</div>
+       ${liveCard && alertsCard ? `<div class="grid split start">${liveCard}${alertsCard}</div>` : liveCard || alertsCard}
        <div class="grid split">
          <div class="card">
            <div class="card-head">
@@ -448,10 +460,15 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
          </div>
          <div class="stack">${minis.join('')}</div>
        </div>
-       <div class="grid split">${recentCard}${missedCard}</div>`,
+       <div class="grid split start">${recentCard}${missedCard}</div>`,
       { active: '/admin', refreshSeconds: active ? 10 : 60 }
     )
   );
+}));
+
+router.post('/admin/alerts/ack-all', wrap(requireAdmin), wrap(async (req, res) => {
+  await acknowledgeAllAlerts();
+  res.redirect('/admin');
 }));
 
 router.post('/admin/alerts/:id/ack', wrap(requireAdmin), wrap(async (req, res) => {
@@ -890,48 +907,51 @@ async function devicesPage(req, enrollUrl) {
   const max = await getSetting('max_devices');
 
   const enrollCard = enrollUrl
-    ? `<div class="card" style="text-align:center">
-         <h2>Enrollment link (valid 30 min, one use)</h2>
-         <img src="${await QRCode.toDataURL(enrollUrl, { width: 220, margin: 1 })}" alt="Enrollment QR">
-         <div><code style="font-size:.8rem">${esc(enrollUrl)}</code></div>
-         <p class="muted">Scan this QR (or open the link) on the phone you want to allow, then press Enroll there.</p>
+    ? `<div class="card tag-card">
+         <h2>Enrollment link — valid 30 min, one use</h2>
+         <img src="${await QRCode.toDataURL(enrollUrl, { width: 220, margin: 1 })}" alt="Enrollment QR code" width="176" height="176">
+         <code>${esc(enrollUrl)}</code>
+         <p class="muted" style="margin:0">Scan this QR (or open the link) on the phone you want to allow, then press Enroll there.</p>
        </div>`
     : '';
 
   return await adminPage(
     'Devices — School Tag',
-    `<h1>Allowed devices</h1>
-     <div class="sub">${devices.length} of ${esc(max)} enrolled · enforcement ${enforcing ? '<span class="pill ok">ON</span>' : '<span class="pill warn">OFF</span>'}</div>
-     ${enrollCard}
-     <div class="card">
-       <table>
-         <tr><th>Name</th><th>Enrolled</th><th>Last seen</th><th></th></tr>
-         ${devices
-           .map(
-             (d) => `<tr>
-               <td>${esc(d.name || d.id)}</td>
-               <td class="muted">${fmtTime(d.enrolled_at)}</td>
-               <td class="muted">${fmtTime(d.last_seen)}</td>
-               <td><form method="post" action="/admin/devices/${esc(d.id)}/delete" data-confirm="${esc(`Remove device ${d.name || d.id}? It will lose access immediately.`)}" onsubmit="return confirm(this.dataset.confirm)"><button class="btn small danger" type="submit">Remove</button></form></td>
-             </tr>`
-           )
-           .join('')}
-       </table>
-       ${devices.length === 0 ? '<p class="muted">No devices enrolled yet.</p>' : ''}
-       <form method="post" action="/admin/devices/enroll-code" style="margin-top:12px">
-         <button class="btn" type="submit">Generate enrollment link</button>
-       </form>
+    `<div class="page-head">
+       <div><h1>Allowed devices</h1>
+         <div class="sub">${devices.length} of ${esc(max)} enrolled · enforcement ${enforcing ? `<span class="pill ok">${icon('check')}On</span>` : `<span class="pill warn">${icon('alert')}Off</span>`}</div></div>
+       <form method="post" action="/admin/devices/enroll-code" class="no-print"><button class="btn small" type="submit">${icon('plus')}Generate enrollment link</button></form>
      </div>
-     <form method="post" action="/admin/devices/settings">
+     ${enrollCard}
+     <div class="grid split start">
        <div class="card">
-         <h2>Enforcement</h2>
-         <label><input type="checkbox" name="require_enrolled_device" value="1" ${enforcing ? 'checked' : ''} style="width:auto;margin-right:8px"> Only enrolled devices can scan tags and run walkthroughs</label>
-         ${enforcing && devices.length === 0 ? '<p class="bad">Warning: enforcement is ON but no devices are enrolled — no phone can scan right now.</p>' : ''}
-         <label for="max_devices" style="margin-top:12px">Maximum devices</label>
-         <input id="max_devices" name="max_devices" type="number" min="1" max="20" value="${esc(max)}">
-         <button class="btn" type="submit">Save</button>
+         <h2>Phones <span class="pill">${devices.length}</span></h2>
+         ${
+           devices.length
+             ? `<ul class="plain">${devices
+                 .map(
+                   (d) => `<li>
+                     <span class="tile blue sm">${icon('phone')}</span>
+                     <div style="flex:1;min-width:0">
+                       <div style="font-weight:650">${ka(d.name || d.id)}</div>
+                       <div class="muted" style="font-size:.82rem">Enrolled ${fmtTime(d.enrolled_at)} · last seen ${d.last_seen ? fmtTime(d.last_seen) : 'never'}</div>
+                     </div>
+                     <form method="post" action="/admin/devices/${esc(d.id)}/delete" data-confirm="${esc(`Remove device ${d.name || d.id}? It will lose access immediately.`)}" onsubmit="return confirm(this.dataset.confirm)"><button class="btn small ghost" type="submit" style="color:var(--bad)" aria-label="Remove ${esc(d.name || d.id)}">Remove</button></form>
+                   </li>`
+                 )
+                 .join('')}</ul>`
+             : '<p class="muted">No devices enrolled yet. Generate an enrollment link and open it on the guard phone.</p>'
+         }
        </div>
-     </form>`,
+       <form method="post" action="/admin/devices/settings" class="card">
+         <h2>Enforcement</h2>
+         <label style="display:flex;gap:10px;align-items:flex-start;font-weight:600;color:var(--text)"><input type="checkbox" name="require_enrolled_device" value="1" ${enforcing ? 'checked' : ''} style="margin-top:3px"> Only enrolled devices can scan tags and run walkthroughs</label>
+         ${enforcing && devices.length === 0 ? `<p><span class="pill bad wrap">${icon('alert')}Enforcement is on but no devices are enrolled — no phone can scan right now.</span></p>` : ''}
+         <label for="max_devices" style="margin-top:14px">Maximum devices</label>
+         <input id="max_devices" name="max_devices" type="number" min="1" max="20" value="${esc(max)}" class="input-sm">
+         <button class="btn" type="submit">Save</button>
+       </form>
+     </div>`,
     { active: '/admin/devices' }
   );
 }
@@ -962,26 +982,16 @@ router.post('/admin/devices/settings', wrap(requireAdmin), wrap(async (req, res)
 
 router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
   const walks = await listWalkthroughs(50);
+  const count = (st) => walks.filter((w) => w.status === st).length;
   res.send(
     await adminPage(
       'History — School Tag',
-      `<h1>Walkthrough history</h1>
+      `<div class="page-head">
+         <div><h1>Walkthrough history</h1>
+           <div class="sub">Last ${walks.length} rounds · ${count('completed')} completed · ${count('incomplete')} incomplete</div></div>
+       </div>
        <div class="card">
-         <table>
-           <tr><th>Started</th><th>Guard</th><th>Scanned</th><th>Status</th><th></th></tr>
-           ${walks
-             .map(
-               (w) => `<tr>
-                 <td>${fmtTime(w.started_at)}</td>
-                 <td>${esc(w.guard_name || '—')}</td>
-                 <td>${w.scanned_count} / ${w.total_checkpoints}</td>
-                 <td>${STATUS_PILL[w.status] || esc(w.status)}</td>
-                 <td><a href="/admin/history/${esc(w.id)}">details</a></td>
-               </tr>`
-             )
-             .join('')}
-         </table>
-         ${walks.length === 0 ? '<p class="muted">No walkthroughs yet.</p>' : ''}
+         ${walks.length ? roundsTable(walks) : '<p class="muted">No walkthroughs yet.</p>'}
        </div>`,
       { active: '/admin/history' }
     )
@@ -1003,38 +1013,53 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
   const preReset = Boolean(reset.at) && w.started_at < reset.at;
   const scanName = (s) => (preReset && reset.names.get(s.checkpoint_id)) || s.checkpoint_name || s.checkpoint_id;
   const preResetAlerts = preReset ? await alertsForWalkthrough(w.id) : [];
+  const took = w.completed_at ? fmtDuration(Date.parse(w.completed_at) - Date.parse(w.started_at)) : '';
+  const listRow = (name, right, cls) => `<li><span class="cp-name">${name}</span><span class="cp-state ${cls}">${right}</span></li>`;
+
+  let otherCard = '';
+  if (w.status === 'cancelled') {
+    otherCard = '<div class="card"><p class="muted">This round was cancelled (for example when the checkpoint list was replaced), so no missed checkpoints are listed.</p></div>';
+  } else if (preReset) {
+    otherCard = w.status === 'completed'
+      ? ''
+      : `<div class="card">
+           <h2 class="bad">Missed</h2>
+           <p class="muted">This round ran before the checkpoint list was replaced; this is the alert that was sent at the time.</p>
+           ${preResetAlerts.length
+             ? preResetAlerts.map((a) => `<div style="white-space:pre-line">${ka(a.message)}</div>`).join('')
+             : '<p class="muted">No alert was recorded for this round.</p>'}
+         </div>`;
+  } else if (w.status === 'in_progress' && missing.length) {
+    otherCard = `<div class="card">
+        <h2>Still to scan <span class="pill info">${missing.length}</span></h2>
+        <ul class="plain cp-list">${missing.map((c) => listRow(place(c.name, c.location), icon('pin'), '')).join('')}</ul>
+      </div>`;
+  } else if (w.status !== 'completed' && missed.length) {
+    otherCard = `<div class="card">
+        <h2 class="bad">Missed (${missed.length})</h2>
+        <ul class="plain cp-list">${missed.map((c) => listRow(place(c.name, c.location), `${icon('x')}missed`, 'bad')).join('')}</ul>
+      </div>`;
+  }
+
   res.send(
     await adminPage(
       'Walkthrough — School Tag',
-      `<h1>Walkthrough ${fmtTime(w.started_at)}</h1>
-       <div class="sub">Guard: ${esc(w.guard_name || '—')} · ${STATUS_PILL[w.status] || esc(w.status)} · Finished: ${fmtTime(w.completed_at)}</div>
-       <div class="card">
-         <h2>Scanned (${scans.length})</h2>
-         <ul class="plain">
-           ${scans.map((s) => `<li><span>${esc(scanName(s))}</span><span class="muted">${fmtTime(s.scanned_at)}</span></li>`).join('')}
-         </ul>
-         ${scans.length === 0 ? '<p class="muted">Nothing scanned.</p>' : ''}
+      `<div class="page-head">
+         <div><h1>Walkthrough ${fmtTime(w.started_at)}</h1>
+           <div class="sub" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">Guard: ${ka(w.guard_name || '—')} · ${STATUS_PILL[w.status] || esc(w.status)} · Finished: ${fmtTime(w.completed_at)}${took ? ` · ${took}` : ''}</div></div>
+         <a class="btn secondary small no-print" href="/admin/history">All rounds</a>
        </div>
-       ${
-         w.status === 'cancelled'
-           ? '<div class="card"><p class="muted">This round was cancelled (for example when the checkpoint list was replaced), so no missed checkpoints are listed.</p></div>'
-           : preReset
-           ? w.status === 'completed'
-             ? ''
-             : `<div class="card">
-                  <h2 class="bad">Missed</h2>
-                  <p class="muted">This round ran before the checkpoint list was replaced; this is the alert that was sent at the time.</p>
-                  ${preResetAlerts.length
-                    ? preResetAlerts.map((a) => `<div style="white-space:pre-line">${esc(a.message)}</div>`).join('')
-                    : '<p class="muted">No alert was recorded for this round.</p>'}
-                </div>`
-           : w.status !== 'completed' && (missed.length || missing.length)
-           ? `<div class="card">
-                <h2 class="bad">Missed (${missed.length})</h2>
-                <ul class="plain">${missed.map((c) => `<li>${esc(c.name)}${c.location ? ` <span class="muted">— ${esc(c.location)}</span>` : ''}</li>`).join('')}</ul>
-              </div>`
-           : ''
-       }`,
+       <div class="grid halves start">
+         <div class="card">
+           <h2>Scanned (${scans.length})</h2>
+           ${
+             scans.length
+               ? `<ul class="plain cp-list">${scans.map((s) => listRow(ka(scanName(s)), `${icon('check')}${fmtClock(s.scanned_at)}`, 'done')).join('')}</ul>`
+               : '<p class="muted">Nothing scanned.</p>'
+           }
+         </div>
+         ${otherCard}
+       </div>`,
       { active: '/admin/history' }
     )
   );

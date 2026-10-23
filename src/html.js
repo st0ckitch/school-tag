@@ -60,14 +60,14 @@ const CSS = `
     --hairline: rgba(15, 23, 42, 0.08);
     --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 12px 32px rgba(36, 44, 92, 0.07);
     --shadow-lift: 0 2px 4px rgba(15, 23, 42, 0.05), 0 10px 24px rgba(36, 44, 92, 0.10);
-    --text: #0f1324; --text-2: #454c63; --muted: #6a7088;
+    --text: #0f1324; --text-2: #454c63; --muted: #5c6279;
     --accent: #6a5af9; --accent-ink: #5443e6; --accent-soft: rgba(106, 90, 249, 0.12);
-    --ok: #12813a; --ok-soft: rgba(22, 163, 74, 0.13);
-    --warn: #9a5b00; --warn-soft: rgba(245, 158, 11, 0.18);
-    --bad: #c42b2b; --bad-soft: rgba(239, 68, 68, 0.12);
+    --ok: #0d6e30; --ok-soft: rgba(22, 163, 74, 0.13);
+    --warn: #8a5100; --warn-soft: rgba(245, 158, 11, 0.18);
+    --bad: #b82626; --bad-soft: rgba(239, 68, 68, 0.12);
     --neutral-soft: rgba(100, 116, 139, 0.14);
     --input-bg: rgba(255, 255, 255, 0.72);
-    --input-border: rgba(15, 23, 42, 0.12);
+    --input-border: #8a90a2;
     --track: rgba(15, 23, 42, 0.08);
     --grid: rgba(15, 23, 42, 0.07);
     --series: #6a5af9; --series-wash: rgba(106, 90, 249, 0.14); --series-quiet: #b4b9cc;
@@ -94,7 +94,7 @@ const CSS = `
       --bad: #f87171; --bad-soft: rgba(248, 113, 113, 0.15);
       --neutral-soft: rgba(148, 163, 184, 0.16);
       --input-bg: rgba(12, 14, 26, 0.55);
-      --input-border: rgba(255, 255, 255, 0.12);
+      --input-border: #6b7193;
       --track: rgba(255, 255, 255, 0.09);
       --grid: rgba(255, 255, 255, 0.07);
       --series: #8a7cff; --series-wash: rgba(138, 124, 255, 0.18); --series-quiet: #5a6080;
@@ -106,7 +106,15 @@ const CSS = `
   /* --- base -------------------------------------------------------------- */
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  html { -webkit-text-size-adjust: 100%; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .skip { position: absolute; left: 12px; top: -60px; z-index: 100; padding: 10px 14px; border-radius: 12px; background: var(--surface-strong); color: var(--text); font-weight: 700; }
+  .skip:focus { top: 12px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+    .btn:active { transform: none; }
+  }
+  html { -webkit-text-size-adjust: 100%; scroll-padding-top: 24px; }
+  @media (max-width: 980px) { html { scroll-padding-top: 80px; scroll-padding-bottom: calc(110px + env(safe-area-inset-bottom)); } }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font-family: 'ST Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Georgian", sans-serif;
@@ -164,12 +172,12 @@ const CSS = `
   .pill.info { background: var(--accent-soft); color: var(--accent-ink); }
   .pill.wrap { white-space: normal; }
   .badge { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 999px; display: inline-grid; place-items: center; font-size: 0.72rem; font-weight: 800; background: var(--surface-strong); color: var(--text-2); }
-  .badge.bad { background: var(--bad); color: #fff; }
+  .badge.bad { background: #dc2626; color: #fff; }
 
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     border: 1px solid transparent; cursor: pointer; font-family: inherit;
-    background: linear-gradient(135deg, #8577ff, #6a5af9 55%, #5b4be8); color: #fff;
+    background: linear-gradient(135deg, #6a5af9, #5443e6); color: #fff;
     padding: 12px 20px; min-height: 46px; border-radius: 14px; font-size: 0.95rem; font-weight: 700; text-decoration: none; white-space: nowrap;
     box-shadow: 0 1px 1px rgba(15, 23, 42, 0.08), 0 8px 20px rgba(106, 90, 249, 0.32);
     transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
@@ -182,12 +190,12 @@ const CSS = `
     background: var(--surface-strong); color: var(--text); border-color: var(--hairline);
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
   }
-  .btn.danger { background: linear-gradient(135deg, #f87171, #dc2626); box-shadow: 0 8px 20px rgba(220, 38, 38, 0.26); }
+  .btn.danger { background: linear-gradient(135deg, #dc2626, #b91c1c); box-shadow: 0 8px 20px rgba(220, 38, 38, 0.26); }
   .btn.ghost { background: transparent; color: var(--text-2); box-shadow: none; }
   .btn.small { padding: 7px 13px; min-height: 36px; font-size: 0.84rem; border-radius: 11px; }
   .btn.big { min-height: 58px; font-size: 1.05rem; border-radius: 18px; }
   .btn.two { flex-direction: column; gap: 1px; line-height: 1.25; padding-top: 10px; padding-bottom: 10px; white-space: normal; }
-  .btn.two .en { font-size: 0.78em; font-weight: 600; opacity: 0.82; }
+  .btn.two .en { font-size: 0.8em; font-weight: 600; }
   details.card > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; }
   details.card > summary::-webkit-details-marker { display: none; }
   details.card > summary::after { content: "▾"; color: var(--muted); transition: transform 0.15s; }
@@ -199,7 +207,10 @@ const CSS = `
     transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
   input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  ::placeholder { color: var(--muted); opacity: 1; }
   input[type="checkbox"] { width: auto; margin: 0 8px 0 0; accent-color: var(--accent); }
+  input.input-sm { max-width: 200px; }
   label { font-size: 0.84rem; font-weight: 600; color: var(--text-2); display: block; margin-bottom: 6px; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .row > * { flex: 1; }
@@ -354,7 +365,7 @@ const CSS = `
     -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
   }
   .profile:hover { text-decoration: none; }
-  .avatar { width: 38px; height: 38px; border-radius: 13px; display: grid; place-items: center; color: #fff; font-weight: 800; background: linear-gradient(140deg, #ff9a8b, #a196ff 60%, #6a5af9); }
+  .avatar { width: 38px; height: 38px; border-radius: 13px; display: grid; place-items: center; color: #fff; font-weight: 800; background: linear-gradient(140deg, #d9466f, #5443e6); }
   .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
   .page-head .sub { margin-bottom: 0; }
   .m-only { display: none; }
@@ -453,6 +464,7 @@ const CSS = `
   @media (max-width: 980px) { .nfc-btn { min-height: 44px; } }
   @media (max-width: 420px) { .guard-top .brand-sub { display: none; } }
   .nfc-btn.on { background: var(--ok-soft); color: var(--ok); }
+  .toast:empty, .toast.idle { opacity: 0; pointer-events: none; }
   .toast {
     position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60;
     width: max-content; max-width: calc(100vw - 32px); padding: 12px 16px; border-radius: 16px; background: var(--tip-bg); color: #fff;
@@ -505,11 +517,13 @@ function adminShell(body, { active, alerts = 0, query = '' }) {
   };
   return `
   <div class="shell">
-    <aside class="sidebar no-print" aria-label="Main navigation">
+    <aside class="sidebar no-print">
       <a class="brand" href="/admin">${brand('Security rounds')}</a>
-      ${ADMIN_NAV.slice(0, 5).map(link).join('')}
-      <div class="nav-section">Guards</div>
-      <a class="nav-item" href="/walk">${icon('route')}<span>Guard app</span></a>
+      <nav aria-label="Main navigation">
+        ${ADMIN_NAV.slice(0, 5).map(link).join('')}
+        <div class="nav-section">Guards</div>
+        <a class="nav-item" href="/walk">${icon('route')}<span>Guard app</span></a>
+      </nav>
       <div class="sidebar-foot">
         ${link(ADMIN_NAV[5])}
         <form method="post" action="/admin/logout"><button class="nav-item" type="submit">${icon('out')}<span>Log out</span></button></form>
@@ -525,11 +539,11 @@ function adminShell(body, { active, alerts = 0, query = '' }) {
         </form>
         <div class="top-actions">
           <a class="iconbtn" href="/admin#alerts" aria-label="${alerts ? `${alerts} new alerts` : 'Alerts'}">${icon('bell')}${alerts ? '<span class="dot"></span>' : ''}</a>
-          <a class="profile" href="/admin/settings" aria-label="Settings"><span class="avatar">A</span><span class="who">Admin</span></a>
+          <a class="profile" href="/admin/settings" aria-label="Admin settings"><span class="avatar" aria-hidden="true">A</span><span class="who">Admin</span></a>
           <form method="post" action="/admin/logout" class="m-only"><button class="iconbtn" type="submit" aria-label="Log out">${icon('out')}</button></form>
         </div>
       </header>
-      ${body}
+      <main id="main">${body}</main>
     </div>
     <nav class="tabbar no-print" aria-label="Main navigation">${ADMIN_NAV.map(tab).join('')}</nav>
   </div>
@@ -548,8 +562,8 @@ function guardShell(body) {
       <a class="brand" href="/walk">${brand('დაცვის შემოვლა · Guard rounds')}</a>
       <button class="nfc-btn no-print" id="st-nfc" type="button" hidden>${icon('nfc')}<span>NFC · Scan here</span></button>
     </header>
-    <div class="toast" id="st-toast" role="status" aria-live="polite" hidden></div>
-    ${body}
+    <div class="toast idle" id="st-toast" role="status" aria-live="polite"></div>
+    <main id="main">${body}</main>
   </div>
   <script>${GUARD_SCRIPT}</script>`;
 }
@@ -629,13 +643,43 @@ const GUARD_SCRIPT = `
 })();
 `;
 
+// Reloads a live page every few seconds, but never while someone is using
+// it: typing, a focused field or chart, an open section, a search term, a
+// hidden tab, or any interaction in the last 15 s. Scroll position is kept.
+function refreshScript(seconds) {
+  return `(function () {
+    var every = ${Number(seconds) * 1000}, loaded = Date.now(), last = 0, key = 'st-scroll:' + location.pathname;
+    ['keydown', 'pointerdown', 'input', 'wheel', 'touchmove'].forEach(function (t) { addEventListener(t, function () { last = Date.now(); }, { passive: true }); });
+    function busy() {
+      var a = document.activeElement;
+      if (a && a.matches && a.matches('input, select, textarea, [tabindex]')) return true;
+      if (document.querySelector('details[open]')) return true;
+      var s = document.querySelector('.search input');
+      if (s && s.value) return true;
+      return Date.now() - last < 15000;
+    }
+    function reload() {
+      try { sessionStorage.setItem(key, String(scrollY)); } catch (e) {}
+      location.reload();
+    }
+    setInterval(function () { if (!document.hidden && !busy()) reload(); }, every);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && Date.now() - loaded > every && !busy()) reload(); });
+    addEventListener('load', function () {
+      try { var y = sessionStorage.getItem(key); if (y) { sessionStorage.removeItem(key); scrollTo(0, Number(y)); } } catch (e) {}
+    });
+  })();`;
+}
+
+// Marks Georgian text as Georgian, so screen readers on English pages read
+// checkpoint and guard names with the right voice.
+const GEORGIAN = /[\u10A0-\u10FF\u1C90-\u1CBF\u2D00-\u2D2F]/;
+const ka = (text) => (GEORGIAN.test(String(text || '')) ? `<span lang="ka">${esc(text)}</span>` : esc(text));
+
 function page(title, body, opts = {}) {
-  const refresh = opts.refreshSeconds
-    ? `<meta http-equiv="refresh" content="${opts.refreshSeconds}">`
-    : '';
+  const refresh = opts.refreshSeconds ? `<script>${refreshScript(opts.refreshSeconds)}</script>` : '';
   let content;
   if (opts.shell) content = adminShell(body, opts.shell);
-  else if (opts.center) content = `<div class="center"><div class="brand">${brand(opts.admin ? 'Admin' : 'დაცვის შემოვლა · Guard rounds')}</div>${body}</div>`;
+  else if (opts.center) content = `<div class="center"><div class="brand">${brand(opts.admin ? 'Admin' : 'დაცვის შემოვლა · Guard rounds')}</div><main id="main">${body}</main></div>`;
   else content = guardShell(body);
   return `<!DOCTYPE html>
 <html lang="${opts.lang || 'en'}">
@@ -657,6 +701,7 @@ function page(title, body, opts = {}) {
   <style>${CSS}</style>
 </head>
 <body>
+  <a class="skip" href="#main">${opts.lang === 'ka' ? 'შინაარსზე გადასვლა · ' : ''}Skip to content</a>
   ${content}
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <defs>
@@ -695,8 +740,8 @@ function page(title, body, opts = {}) {
 function place(name, location) {
   const loc = String(location || '').trim();
   return loc && loc !== String(name || '').trim()
-    ? `${esc(name)} <span class="muted">— ${esc(loc)}</span>`
-    : esc(name);
+    ? `${ka(name)} <span class="muted">— ${ka(loc)}</span>`
+    : ka(name);
 }
 
 // Progress ring for the guard app: how many of the checkpoints are scanned.
@@ -704,11 +749,11 @@ function ring(done, total, caption) {
   const r = 56;
   const c = 2 * Math.PI * r;
   const frac = total ? Math.min(1, done / total) : 1;
-  return `<div class="ring" role="img" aria-label="${done} / ${total}">
+  return `<div class="ring" role="img" aria-label="${done} / ${total} ${esc(caption)}">
     <svg viewBox="0 0 132 132"><circle class="track" cx="66" cy="66" r="${r}" fill="none" stroke-width="12"/>
       <circle class="fill" cx="66" cy="66" r="${r}" fill="none" stroke-width="12" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${(c * (1 - frac)).toFixed(1)}"/></svg>
     <div class="ring-label"><div><b>${done}<span style="font-size:1rem;color:var(--muted)">/${total}</span></b><br><span>${esc(caption)}</span></div></div>
   </div>`;
 }
 
-module.exports = { esc, page, icon, ring, place };
+module.exports = { esc, page, icon, ring, place, ka };
