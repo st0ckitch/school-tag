@@ -186,8 +186,8 @@ protected by the PIN, not by device enrollment.
 
 ## Deployment notes
 
-The server must be reachable from the guards' phones. There are two ways to
-host it:
+The server must be reachable from the guards' phones. There are three ways
+to host it:
 
 ### Option A — Vercel (serverless)
 
@@ -225,6 +225,25 @@ host it:
   (defaults to Asia/Tbilisi for display).
 - The built-in scheduler checks deadlines every 30 seconds — no external cron
   needed.
+
+### Option C — Railway
+
+1. Create a service from this repository and turn on auto-deploy for the
+   branch you push to. Every push to that branch redeploys.
+2. **Attach a volume** to the service (e.g. mounted at `/data`) and set
+   `DATA_DIR=/data`. Without a volume the database lives in the container
+   and **every deploy starts with an empty database**.
+3. Set `TZ=Asia/Tbilisi`. The built-in scheduler runs here too, so no cron
+   is needed.
+4. Deploys never delete or replace existing checkpoints. The first start of
+   a database with this release shows one of these in the Deploy Logs (later
+   starts print none of them):
+   - `[setup] kept the existing N checkpoint(s) unchanged` — the normal case;
+   - `[setup] empty checkpoint list filled with 21 school checkpoints` — only
+     on a brand-new, empty database;
+   - `[setup] restored N checkpoint(s) with their chip codes from the backup`
+     — only if an older release had replaced the list and nothing was linked
+     since.
 
 ## How it decides something was missed
 
