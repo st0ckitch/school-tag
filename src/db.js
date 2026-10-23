@@ -95,35 +95,43 @@ async function initSchema() {
   //  - linked: a physical chip has been bound to the checkpoint's code
   //  - placeholder: created by a restore tool without a real name; the
   //    tap-to-link flow may delete it when its chip gets a real checkpoint
-  const info = await client.execute('PRAGMA table_info(checkpoints)');
-  const has = (col) => info.rows.some((r) => r.name === col);
-  const addedLinked = !has('linked') && (await addColumn('ALTER TABLE checkpoints ADD COLUMN linked INTEGER NOT NULL DEFAULT 0'));
-  if (!has('placeholder')) {
-    if (await addColumn('ALTER TABLE checkpoints ADD COLUMN placeholder INTEGER NOT NULL DEFAULT 0')) {
+  // Each column is added together with its backfill in one transaction, so an
+  // interrupted start can't leave a column without its values. When another
+  // process adds them first, the transaction rolls back and we look again.
+  for (let attempt = 0; ; attempt++) {
+    const info = await client.execute('PRAGMA table_info(checkpoints)');
+    const has = (col) => info.rows.some((r) => r.name === col);
+    const steps = [];
+    if (!has('placeholder')) {
+      steps.push('ALTER TABLE checkpoints ADD COLUMN placeholder INTEGER NOT NULL DEFAULT 0');
       // Rows from the earlier restore tools carried their placeholder status
       // only in the name.
-      await client.execute(
-        "UPDATE checkpoints SET placeholder = 1 WHERE name GLOB 'Checkpoint [0-9]*' OR name GLOB 'Tag [0-9a-f]*'"
-      );
+      steps.push(`UPDATE checkpoints SET placeholder = 1 WHERE ${PLACEHOLDER_NAME_SQL}`);
     }
-  }
-  if (addedLinked) {
-    // Checkpoints from before this column existed were written to chips from
-    // the tag sheet, so their codes are already bound to physical chips.
-    await client.execute('UPDATE checkpoints SET linked = 1 WHERE placeholder = 0');
+    if (!has('linked')) {
+      steps.push('ALTER TABLE checkpoints ADD COLUMN linked INTEGER NOT NULL DEFAULT 0');
+      // Checkpoints from before this column existed were written to chips from
+      // the tag sheet, so their codes are already bound to physical chips.
+      steps.push('UPDATE checkpoints SET linked = 1 WHERE placeholder = 0');
+    }
+    if (!steps.length) return;
+    try {
+      await client.batch(steps, 'write');
+      return;
+    } catch (err) {
+      if (attempt < 2 && /duplicate column/i.test(err.message)) continue;
+      throw err;
+    }
   }
 }
 
-// Returns false when another process added the column first.
-async function addColumn(sql) {
-  try {
-    await client.execute(sql);
-    return true;
-  } catch (err) {
-    if (/duplicate column/i.test(err.message)) return false;
-    throw err;
-  }
-}
+// The same names isPlaceholderName() accepts: "Checkpoint <digits>" or
+// "Tag <6-16 hex>", whole name, any case.
+const PLACEHOLDER_NAME_SQL = `(
+  (lower(trim(name)) GLOB 'checkpoint [0-9]*' AND substr(trim(name), 12) NOT GLOB '*[^0-9]*')
+  OR (lower(trim(name)) GLOB 'tag [0-9a-f]*' AND length(trim(name)) BETWEEN 10 AND 20
+      AND lower(substr(trim(name), 5)) NOT GLOB '*[^0-9a-f]*')
+)`;
 
 // Lazy init: schema creation runs once, before the first query. A failed
 // attempt must not stay cached, or one startup blip poisons the process.
