@@ -263,6 +263,7 @@ async function sendViaBrevo(to, apiKey, subject, text) {
   }
 }
 
+const SMTP_DEADLINE_MS = 10000;
 async function sendViaSmtp(to, user, pass, subject, text) {
   const host = ((await getSetting('smtp_host')) || '').trim() || 'smtp.gmail.com';
   const port = parseInt(await getSetting('smtp_port'), 10) || 465;
@@ -294,7 +295,25 @@ async function sendViaSmtp(to, user, pass, subject, text) {
       logger,
     });
     step(`Connecting to ${host}:${port} (${port === 465 ? 'TLS' : 'STARTTLS if offered'}) as ${user}, from ${from}`);
-    await transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text });
+    // nodemailer tries each of the host's addresses in turn, each with its
+    // own timeout (Gmail has eight), so cap the whole attempt: the guard's
+    // Finish waits for it.
+    const deadlineMs = Number(process.env.SMTP_DEADLINE_MS) || SMTP_DEADLINE_MS;
+    let timer;
+    const deadline = new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error(`no answer from the server within ${deadlineMs / 1000} s`);
+        err.code = 'ETIMEDOUT';
+        err.command = 'CONN';
+        reject(err);
+      }, deadlineMs);
+      timer.unref();
+    });
+    try {
+      await Promise.race([transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text }), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
     step('Accepted by the server');
     return { ok: true, steps };
   } catch (err) {

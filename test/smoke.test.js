@@ -1308,3 +1308,26 @@ test('an unreachable SMTP server on Railway explains the Railway SMTP block', as
     delete process.env.RAILWAY_PROJECT_ID;
   }
 });
+
+test('an SMTP attempt that never finishes gives up at the deadline instead of holding up Finish', async () => {
+  const { sendEmail } = require('../src/notify');
+  const net = require('node:net');
+  // Accepts the connection and never greets, like a filtered SMTP port.
+  const sockets = [];
+  const silent = net.createServer((s) => sockets.push(s)).listen(0, '127.0.0.1');
+  await new Promise((r) => silent.once('listening', r));
+  process.env.SMTP_DEADLINE_MS = '400';
+  try {
+    await withSmtp(silent.address().port, 'x', async () => {
+      const started = Date.now();
+      const result = await sendEmail('Subject', 'Body');
+      assert.ok(Date.now() - started < 2000, `gave up after ${Date.now() - started} ms`);
+      assert.equal(result.ok, false);
+      assert.match(result.error, /no answer from the server within 0\.4 s/);
+    });
+  } finally {
+    delete process.env.SMTP_DEADLINE_MS;
+    for (const s of sockets) s.destroy();
+    silent.close();
+  }
+});
