@@ -27,7 +27,7 @@ const {
   alertsForWalkthrough,
 } = require('../db');
 const { tick } = require('../scheduler');
-const { sendEmail, lastEmailResult, parseRecipients } = require('../notify');
+const { sendEmail, lastEmailResult, emailLog, parseRecipients } = require('../notify');
 const { resetInfo } = require('../school-checkpoints');
 const { esc, page } = require('../html');
 
@@ -857,6 +857,25 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const emailTest = await readFlash(req, 'email_test');
   const settingsErr = await readFlash(req, 'settings_err');
   const lastEmail = await lastEmailResult();
+  const log = await emailLog();
+  const logView = log.length
+    ? `<details class="no-print"${log[0].ok ? '' : ' open'} style="margin:0 0 14px">
+         <summary style="cursor:pointer;font-weight:650">Email log — last ${log.length} attempt${log.length === 1 ? '' : 's'}</summary>
+         <ul class="plain" style="margin-top:6px">${log
+           .map(
+             (e) => `<li style="display:block">
+               <div style="font-size:.85rem"><b>${fmtTime(e.at)}</b> · “${esc(e.subject)}”${e.channel ? ` · via ${esc(e.channel)}` : ''}</div>
+               ${(e.recipients || [])
+                 .map(
+                   (r) => `<div style="font-size:.85rem;margin-top:4px">${r.ok ? `<span class="ok">✓ ${esc(r.to)}</span>` : `<span class="bad">✕ ${esc(r.to)}</span> — ${esc(r.error)}`}</div>
+                     ${r.steps && r.steps.length ? `<pre style="white-space:pre-wrap;word-break:break-word;font-size:.76rem;line-height:1.5;margin:6px 0 0;padding:8px 10px;border-radius:10px;background:var(--track)">${esc(r.steps.join('\n'))}</pre>` : ''}`
+                 )
+                 .join('') || (e.error ? `<div class="bad" style="font-size:.85rem;margin-top:4px">✕ ${esc(e.error)}</div>` : '')}
+             </li>`
+           )
+           .join('')}</ul>
+       </details>`
+    : '';
   // Mail claiming a free-mail From address but sent by another service is
   // often rejected or filed as spam by Gmail and others (DMARC).
   const freeMailFrom = [brevoFromEmail, mailchimpFromEmail].find((a) =>
@@ -886,6 +905,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            ${emailTest ? (emailTest === 'ok' || emailTest.startsWith('ok:') ? `<p class="ok">✓ Test email sent${emailTest.length > 3 ? ` to ${esc(emailTest.slice(3))}` : ''} — check the inbox (and the spam folder).</p>` : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
            ${settingsErr ? `<p class="bad">✕ ${esc(settingsErr)}</p>` : ''}
            ${lastEmail ? `<p class="muted" style="font-size:.85rem">Last notification email: ${fmtTime(lastEmail.at)} · “${esc(lastEmail.subject)}” — ${lastEmail.ok ? `<span class="ok">✓ accepted for ${esc(lastEmail.sent.join(', '))}</span>` : `<span class="bad">✕ ${esc(lastEmail.error)}</span>`}<br>“Accepted” means the email service took it. If it still doesn't arrive, check the Spam folder and the service's sending logs (Brevo: Transactional → Logs).</p>` : ''}
+           ${logView}
            ${freeMailFrom ? `<p class="warn" style="font-size:.85rem">⚠ The From address ${esc(freeMailFrom.trim())} is a free-mail address. Gmail and others often reject or spam mail that claims such an address but is sent by Brevo or Mailchimp. Verify your own domain with the email service and use an address on it (e.g. security@your-school.ge).</p>` : ''}
            <label for="notify_email">Send notifications to these emails — separate several with commas</label>
            <input id="notify_email" name="notify_email" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(notifyEmail)}" placeholder="director@myschool.ge, deputy@myschool.ge">

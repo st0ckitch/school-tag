@@ -1,6 +1,7 @@
 'use strict';
 
 const { domainToASCII } = require('node:url');
+const util = require('node:util');
 const webpush = require('web-push');
 const { getSetting, setSetting, listPushSubscriptions, deletePushSubscription } = require('./db');
 
@@ -40,12 +41,27 @@ async function getVapidKeys() {
 async function sendEmail(subject, text) {
   const result = await attemptEmail(subject, text);
   try {
-    const last = { at: new Date().toISOString(), subject, ok: result.ok, sent: result.sent || [], error: result.error || '' };
+    const at = new Date().toISOString();
+    const last = { at, subject, ok: result.ok, sent: result.sent || [], error: result.error || '' };
     await setSetting('email_last_result', JSON.stringify(last));
+    const entry = { ...last, channel: result.channel || '', recipients: result.details || [] };
+    await setSetting('email_log', JSON.stringify([entry, ...(await emailLog())].slice(0, EMAIL_LOG_SIZE)));
   } catch (err) {
     console.error('[email] could not record the result:', err.message);
   }
   return result;
+}
+
+// The most recent attempts, newest first, each with every recipient's
+// outcome (and, for SMTP, the steps of the conversation with the server).
+const EMAIL_LOG_SIZE = 15;
+async function emailLog() {
+  try {
+    const log = JSON.parse((await getSetting('email_log')) || '[]');
+    return Array.isArray(log) ? log : [];
+  } catch (err) {
+    return [];
+  }
 }
 
 async function lastEmailResult() {
@@ -82,11 +98,11 @@ async function attemptEmail(subject, text) {
     console.error('[email] aborted: recipient email not set');
     return { ok: false, error: 'recipient email not set' };
   }
-  const toAll = (send) => sendToEach(recipients, invalid, send);
+  const toAll = (channel, send) => sendToEach(recipients, invalid, send, channel);
 
   if (apiKey.startsWith('md-')) {
     console.log('[email] channel: Mailchimp Transactional');
-    return toAll((to) => sendViaMandrill(to, apiKey, subject, text));
+    return toAll('Mailchimp Transactional', (to) => sendViaMandrill(to, apiKey, subject, text));
   }
   if (brevoKey) {
     if (brevoKey.startsWith('xsmtpsib-')) {
@@ -99,11 +115,11 @@ async function attemptEmail(subject, text) {
       };
     }
     console.log('[email] channel: Brevo (HTTPS)');
-    return toAll((to) => sendViaBrevo(to, brevoKey, subject, text));
+    return toAll('Brevo', (to) => sendViaBrevo(to, brevoKey, subject, text));
   }
   if (smtpUser && smtpPass) {
     console.log('[email] channel: SMTP');
-    return toAll((to) => sendViaSmtp(to, smtpUser, smtpPass, subject, text));
+    return toAll('SMTP', (to) => sendViaSmtp(to, smtpUser, smtpPass, subject, text));
   }
   console.error('[email] aborted: no usable channel configured');
   if (apiKey) {
@@ -153,14 +169,19 @@ function parseRecipients(value) {
 
 // One send per recipient. Succeeds only when every address got its copy;
 // otherwise the error says who got it and why the others didn't.
-async function sendToEach(recipients, invalid, send) {
+async function sendToEach(recipients, invalid, send, channel) {
   const results = await Promise.all(recipients.map(async (to) => ({ to, ...(await send(to)) })));
   const sent = results.filter((r) => r.ok).map((r) => r.to);
   const failed = results.filter((r) => !r.ok);
-  if (!failed.length && !invalid.length) return { ok: true, sent };
+  const details = [
+    ...results.map((r) => ({ to: r.to, ok: r.ok, error: r.error || '', steps: r.steps || [] })),
+    ...invalid.map((a) => ({ to: a, ok: false, error: 'not a valid email address', steps: [] })),
+  ];
+  const base = { sent, channel, details };
+  if (!failed.length && !invalid.length) return { ok: true, ...base };
   // The same failure for everyone is a setup problem, not an address one.
   if (!sent.length && !invalid.length && failed.every((r) => r.error === failed[0].error)) {
-    return { ok: false, sent, error: failed[0].error };
+    return { ok: false, ...base, error: failed[0].error };
   }
   const problems = [
     ...failed.map((r) => `${r.to} — ${r.error}`),
@@ -168,7 +189,7 @@ async function sendToEach(recipients, invalid, send) {
   ];
   return {
     ok: false,
-    sent,
+    ...base,
     error: (sent.length ? `sent to ${sent.join(', ')}, but ` : '') + `not sent to ${problems.join('; ')}`,
   };
 }
@@ -246,6 +267,20 @@ async function sendViaSmtp(to, user, pass, subject, text) {
   const host = ((await getSetting('smtp_host')) || '').trim() || 'smtp.gmail.com';
   const port = parseInt(await getSetting('smtp_port'), 10) || 465;
   const from = ((await getSetting('smtp_from')) || '').trim() || user;
+  // Each step of the conversation with the server (connect, TLS, login,
+  // send), from nodemailer's info-level events — never the password or the
+  // raw protocol transcript.
+  const started = Date.now();
+  const steps = [];
+  const step = (message) => {
+    const line = `+${((Date.now() - started) / 1000).toFixed(1)}s ${message}`;
+    steps.push(line);
+    console.log(`[smtp] ${to}: ${line}`);
+  };
+  const logger = { trace() {}, debug() {} };
+  for (const level of ['info', 'warn', 'error', 'fatal']) {
+    logger[level] = (entry, message, ...args) => step(util.format(message, ...args));
+  }
   try {
     const nodemailer = require('nodemailer');
     const transport = nodemailer.createTransport({
@@ -256,12 +291,14 @@ async function sendViaSmtp(to, user, pass, subject, text) {
       connectionTimeout: 8000,
       greetingTimeout: 8000,
       socketTimeout: 12000,
+      logger,
     });
-    console.log('[email] SMTP connecting:', { host, port, user, from, to });
+    step(`Connecting to ${host}:${port} (${port === 465 ? 'TLS' : 'STARTTLS if offered'}) as ${user}, from ${from}`);
     await transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text });
-    console.log('[email] SMTP sent OK to', to);
-    return { ok: true };
+    step('Accepted by the server');
+    return { ok: true, steps };
   } catch (err) {
+    step(`Failed${err.command ? ` at ${err.command}` : ''}: ${[err.code, err.message].filter(Boolean).join(' ')}`);
     console.error('[email] SMTP send FAILED:', {
       message: err.message,
       code: err.code,
@@ -270,8 +307,26 @@ async function sendViaSmtp(to, user, pass, subject, text) {
       response: err.response,
     });
     const detail = err.response ? `${err.message} — server said: ${err.response}` : err.message;
-    return { ok: false, error: detail };
+    return { ok: false, error: detail + smtpHint(err, host, port), steps };
   }
+}
+
+// What an SMTP failure usually means, in words an admin can act on.
+function smtpHint(err, host, port) {
+  const onRailway = Boolean(process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT);
+  const text = `${err.code || ''} ${err.message || ''}`;
+  if (/wrong version number|SSL routines|tls/i.test(text) && !/timeout/i.test(text)) {
+    return ' — TLS mismatch: use port 465 (TLS) or 587 (STARTTLS).';
+  }
+  if (/ETIMEDOUT|ECONNECTION|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ESOCKET|EDNS|timeout/i.test(text)) {
+    return onRailway
+      ? ` — Railway blocks outgoing SMTP (ports 25, 465, 587, 2525) on its Free, Trial and Hobby plans, so ${host}:${port} can't be reached from here. Use Brevo (it sends over HTTPS), or move the Railway workspace to the Pro plan and redeploy.`
+      : ` — ${host}:${port} could not be reached; check the host and port, and that this server may make outgoing SMTP connections.`;
+  }
+  if (err.code === 'EAUTH') {
+    return ' — the server refused the login. For Gmail, use an App Password (Google Account → Security → 2-Step Verification → App passwords), not your normal password.';
+  }
+  return '';
 }
 
 // Native push to every subscribed phone (installed app / APK). Dead
@@ -368,4 +423,4 @@ async function sendNotification(title, message, priority = 'high') {
   return results;
 }
 
-module.exports = { sendNotification, sendEmail, lastEmailResult, getVapidKeys, parseRecipients };
+module.exports = { sendNotification, sendEmail, lastEmailResult, emailLog, getVapidKeys, parseRecipients };

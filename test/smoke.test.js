@@ -986,9 +986,7 @@ async function withBrevo(recipients, fn) {
   try {
     await fn();
   } finally {
-    await db.setSetting('notify_email', '');
-    await db.setSetting('brevo_api_key', '');
-    await db.setSetting('brevo_from_email', '');
+    for (const k of ['notify_email', 'brevo_api_key', 'brevo_from_email', 'email_log', 'email_last_result']) await db.setSetting(k, '');
   }
 }
 
@@ -1208,4 +1206,105 @@ test('Settings shows what happened to the last notification email', async () => 
     assert.match(page, /The From address someone@gmail\.com is a free-mail address/);
   });
   await db.setSetting('email_last_result', '');
+});
+
+// A minimal SMTP server: greets, accepts AUTH PLAIN for one password, and
+// takes the message. Records every command it receives.
+function fakeSmtp(password) {
+  const net = require('node:net');
+  const commands = [];
+  const server = net.createServer((socket) => {
+    let inData = false;
+    socket.write('220 fake.test ESMTP\r\n');
+    let buf = '';
+    socket.on('data', (chunk) => {
+      buf += chunk.toString();
+      let i;
+      while ((i = buf.indexOf('\r\n')) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (inData) {
+          if (line === '.') { inData = false; socket.write('250 queued\r\n'); }
+          continue;
+        }
+        commands.push(line.split(' ')[0].toUpperCase());
+        if (/^EHLO/i.test(line)) socket.write('250-fake.test\r\n250 AUTH PLAIN\r\n');
+        else if (/^AUTH PLAIN/i.test(line)) {
+          const creds = Buffer.from(line.split(' ')[2] || '', 'base64').toString().split('\0');
+          socket.write(creds[2] === password ? '235 ok\r\n' : '535 5.7.8 Username and Password not accepted\r\n');
+        } else if (/^DATA/i.test(line)) { inData = true; socket.write('354 go\r\n'); }
+        else if (/^QUIT/i.test(line)) { socket.write('221 bye\r\n'); socket.end(); }
+        else socket.write('250 ok\r\n');
+      }
+    });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, commands })));
+}
+
+async function withSmtp(port, pass, fn) {
+  await db.setSetting('email_log', '');
+  await db.setSetting('notify_email', 'a@example.com, b@example.com');
+  await db.setSetting('smtp_host', '127.0.0.1');
+  await db.setSetting('smtp_port', String(port));
+  await db.setSetting('smtp_user', 'school@example.com');
+  await db.setSetting('smtp_pass', pass);
+  try {
+    await fn();
+  } finally {
+    for (const k of ['notify_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'email_log', 'email_last_result']) await db.setSetting(k, '');
+  }
+}
+
+test('SMTP sends are logged step by step, without the password, and shown on Settings', async () => {
+  const { sendEmail, emailLog } = require('../src/notify');
+  const smtp = await fakeSmtp('app-password-123');
+  const cookie = await adminCookie();
+  try {
+    await withSmtp(smtp.port, 'app-password-123', async () => {
+      const result = await sendEmail('✅ School security: walkthrough completed', 'Body');
+      assert.equal(result.ok, true);
+      const [entry] = await emailLog();
+      assert.equal(entry.channel, 'SMTP');
+      assert.deepEqual(entry.recipients.map((r) => [r.to, r.ok]), [['a@example.com', true], ['b@example.com', true]]);
+      const steps = entry.recipients[0].steps.join('\n');
+      assert.match(steps, /Connecting to 127\.0\.0\.1:\d+/);
+      assert.match(steps, /authenticated/i);
+      assert.match(steps, /Accepted by the server/);
+      assert.doesNotMatch(JSON.stringify(entry), /app-password-123/);
+
+      // A wrong password: the step log and the hint say what to do.
+      await db.setSetting('smtp_pass', 'wrong');
+      const bad = await sendEmail('⚠️ School security: checkpoints missed', 'Body');
+      assert.equal(bad.ok, false);
+      assert.match(bad.error, /App Password/);
+      const page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
+      assert.match(page, /Email log — last 2 attempts/);
+      assert.match(page, /<details class="no-print" open/, 'a failed last attempt opens the log');
+      assert.match(page, /via SMTP/);
+      assert.match(page, /Failed at AUTH PLAIN: EAUTH/);
+      assert.doesNotMatch(page, /wrong<|app-password-123/);
+    });
+  } finally {
+    smtp.server.close();
+  }
+});
+
+test('an unreachable SMTP server on Railway explains the Railway SMTP block', async () => {
+  const { sendEmail } = require('../src/notify');
+  const net = require('node:net');
+  const closed = net.createServer().listen(0, '127.0.0.1');
+  await new Promise((r) => closed.once('listening', r));
+  const port = closed.address().port;
+  closed.close();
+  process.env.RAILWAY_PROJECT_ID = 'test-project';
+  try {
+    await withSmtp(port, 'x', async () => {
+      const result = await sendEmail('Subject', 'Body');
+      assert.equal(result.ok, false);
+      assert.match(result.error, /Railway blocks outgoing SMTP .* Free, Trial and Hobby plans/);
+      assert.match(result.error, /Use Brevo/);
+    });
+  } finally {
+    delete process.env.RAILWAY_PROJECT_ID;
+  }
 });
