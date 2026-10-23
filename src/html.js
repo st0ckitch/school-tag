@@ -43,7 +43,7 @@ const icon = (name, cls = '') =>
 const CSS = `
   /* One family from two variable fonts: Plus Jakarta Sans draws Latin and
      digits, Noto Sans Georgian draws Georgian (both SIL OFL, self-hosted). */
-  @font-face { font-family: 'ST Sans'; src: url('/fonts/PlusJakartaSans.woff2') format('woff2'); font-weight: 200 800; font-style: normal; font-display: swap;
+  @font-face { font-family: 'ST Sans'; src: url('/fonts/PlusJakartaSans.woff2') format('woff2'); font-weight: 100 900; font-style: normal; font-display: swap;
     unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
   @font-face { font-family: 'ST Sans'; src: url('/fonts/NotoSansGeorgian.woff2') format('woff2'); font-weight: 100 900; font-style: normal; font-display: swap;
     unicode-range: U+0589, U+10A0-10FF, U+1C90-1CBA, U+1CBD-1CBF, U+205A, U+2D00-2D2F, U+2E31; }
@@ -72,6 +72,7 @@ const CSS = `
     --grid: rgba(15, 23, 42, 0.07);
     --series: #6a5af9; --series-wash: rgba(106, 90, 249, 0.14); --series-quiet: #b4b9cc;
     --ring-surface: #f7f7fb;
+    --tip-bg: #12142a;
     --r-lg: 24px; --r-md: 16px; --r-sm: 12px;
   }
   @media (prefers-color-scheme: dark) {
@@ -98,6 +99,7 @@ const CSS = `
       --grid: rgba(255, 255, 255, 0.07);
       --series: #8a7cff; --series-wash: rgba(138, 124, 255, 0.18); --series-quiet: #5a6080;
       --ring-surface: #1c1f33;
+      --tip-bg: #2e3256;
     }
   }
 
@@ -132,7 +134,7 @@ const CSS = `
   .muted { color: var(--muted); }
   .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
   .big { font-size: 2.4rem; font-weight: 800; letter-spacing: -0.035em; line-height: 1.1; }
-  code { background: var(--surface-sunk); border: 1px solid var(--hairline); padding: 1px 6px; border-radius: 7px; font-size: 0.84em; word-break: break-all; }
+  code { background: var(--surface-sunk); border: 1px solid var(--hairline); padding: 1px 6px; border-radius: 7px; font-size: 0.84em; overflow-wrap: anywhere; }
   .ic { width: 20px; height: 20px; flex: none; }
   .num { font-variant-numeric: tabular-nums; }
 
@@ -146,7 +148,7 @@ const CSS = `
   }
   .card > :last-child { margin-bottom: 0; }
   .card.flush { padding: 0; overflow: hidden; }
-  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; min-height: 36px; }
   .card-head h2 { margin: 0; }
 
   /* --- pills, buttons, forms --------------------------------------------- */
@@ -226,7 +228,9 @@ const CSS = `
   .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .split { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
   .halves { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .stack { display: grid; gap: 16px; }
+  .stack { display: grid; gap: 16px; grid-auto-rows: 1fr; }
+  .stack > .card { margin-bottom: 0; }
+  .split.start { align-items: start; }
   .stat { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
   .stat-label { font-size: 0.86rem; font-weight: 600; color: var(--text-2); }
   .stat-value { font-size: 1.9rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.15; margin: 4px 0 8px; }
@@ -234,7 +238,9 @@ const CSS = `
   .delta { display: inline-flex; align-items: center; gap: 3px; font-size: 0.8rem; font-weight: 700; }
   .delta .ic { width: 14px; height: 14px; stroke-width: 2.6; }
   .delta.good { color: var(--ok); } .delta.bad { color: var(--bad); } .delta.flat { color: var(--muted); }
-  .delta-note { font-size: 0.8rem; color: var(--muted); font-weight: 500; margin-left: 4px; }
+  .delta-note { font-size: 0.8rem; color: var(--muted); font-weight: 500; margin-left: 4px; white-space: nowrap; }
+  .delta { white-space: nowrap; }
+  .delta .ic { vertical-align: -2px; }
   .tile {
     width: 48px; height: 48px; border-radius: 15px; display: grid; place-items: center; flex: none; color: #fff;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 8px 18px var(--tile-shadow, rgba(106, 90, 249, 0.3));
@@ -252,17 +258,17 @@ const CSS = `
   .spark { width: 120px; height: 44px; flex: none; }
 
   /* --- charts ------------------------------------------------------------ */
-  .chart { position: relative; }
+  .chart { position: relative; touch-action: pan-y; }
   .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
   .chart .gridline { stroke: var(--grid); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .chart .axis-label { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
   .chart .series-line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
   .chart .crosshair { stroke: var(--muted); stroke-width: 1; opacity: 0; vector-effect: non-scaling-stroke; }
-  .chart .hover-dot { fill: var(--series); stroke: var(--ring-surface); stroke-width: 2; opacity: 0; }
+  .chart .hover-dot { fill: var(--series); stroke: var(--ring-surface); stroke-width: 2; opacity: 0; vector-effect: non-scaling-stroke; }
   .chart.hovering .crosshair, .chart.hovering .hover-dot { opacity: 1; }
   .chart-tip {
     position: absolute; top: 0; left: 0; pointer-events: none; opacity: 0; transform: translate(-50%, -100%);
-    background: #12142a; color: #fff; border-radius: 12px; padding: 8px 11px; font-size: 0.78rem; line-height: 1.4;
+    background: var(--tip-bg); color: #fff; border: 1px solid var(--surface-border); border-radius: 12px; padding: 8px 11px; font-size: 0.78rem; line-height: 1.4;
     box-shadow: 0 10px 24px rgba(15, 23, 42, 0.25); white-space: nowrap; transition: opacity 0.1s;
   }
   .chart.hovering .chart-tip { opacity: 1; }
@@ -289,7 +295,7 @@ const CSS = `
   .tag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px; }
   .tag-grid .card { margin: 0; }
   .tag-card { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; }
-  .tag-head { display: flex; gap: 10px; align-items: flex-start; align-self: stretch; text-align: left; }
+  .tag-head { display: flex; gap: 10px; align-items: flex-start; align-self: stretch; text-align: left; min-height: 3.4em; }
   .tag-head h2 { margin: 2px 0 0; display: block; }
   .tag-card img { border-radius: 12px; background: #fff; padding: 6px; }
   .tag-card code { font-size: 0.74rem; }
@@ -324,7 +330,7 @@ const CSS = `
   .nav-section { font-size: 0.7rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 18px 12px 6px; }
   .sidebar-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--hairline); }
   .main { margin-left: 280px; padding: 16px 24px 40px 0; }
-  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; position: sticky; top: 12px; z-index: 30; }
+  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; position: relative; z-index: 30; }
   .search {
     flex: 1; max-width: 520px; display: flex; align-items: center; gap: 10px; padding: 0 16px; height: 50px;
     background: var(--surface); border: 1px solid var(--surface-border); border-radius: 18px; box-shadow: var(--shadow);
@@ -361,7 +367,14 @@ const CSS = `
   @media (max-width: 980px) {
     .sidebar { display: none; }
     .main { margin: 0; padding: 12px 16px calc(104px + env(safe-area-inset-bottom)); }
-    .topbar { top: 8px; margin-bottom: 16px; }
+    .topbar {
+      position: sticky; top: 0; margin: -12px -16px 16px; padding: calc(8px + env(safe-area-inset-top)) 16px 8px;
+      background: var(--surface-strong); border-bottom: 1px solid var(--hairline);
+      -webkit-backdrop-filter: blur(24px) saturate(170%); backdrop-filter: blur(24px) saturate(170%);
+    }
+    .topbar .iconbtn, .topbar .profile { box-shadow: none; }
+    .btn.small { min-height: 44px; }
+    details.card > summary, .cp-edit > summary, details.table-view summary { padding: 10px 0; }
     .search { display: none; }
     .m-only { display: flex; }
     .profile .who { display: none; }
@@ -393,10 +406,20 @@ const CSS = `
     .tile { width: 40px; height: 40px; border-radius: 13px; }
     .tile .ic { width: 20px; height: 20px; }
     .delta-note { display: block; margin: 2px 0 0; }
-    .chart .axis-label { font-size: 22px; }
+    .chart .axis-label { font-size: 26px; }
     .chart .axis-label.minor { display: none; }
     .hide-sm { display: none; }
     ul.plain li.wrap > form { flex-basis: 100%; }
+    .chart .hover-dot { r: 11px; }
+    .cp-edit form.row > div, .cp-edit form.row > .btn { flex-basis: 100%; }
+    .card-head .grow-sm { flex: 1 1 100% !important; max-width: none !important; }
+    ul.plain li.bars { flex-wrap: wrap; }
+    ul.plain li.bars .bar-track { order: 3; flex-basis: 100% !important; width: auto !important; }
+  }
+
+  @media (max-width: 400px) {
+    th, td { padding-left: 5px; padding-right: 5px; }
+    td .pill .ic { display: none; }
   }
 
   /* --- guard app ---------------------------------------------------------- */
@@ -427,10 +450,12 @@ const CSS = `
     background: var(--accent-soft); color: var(--accent-ink);
   }
   .nfc-btn .ic { width: 17px; height: 17px; }
+  @media (max-width: 980px) { .nfc-btn { min-height: 44px; } }
+  @media (max-width: 420px) { .guard-top .brand-sub { display: none; } }
   .nfc-btn.on { background: var(--ok-soft); color: var(--ok); }
   .toast {
     position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60;
-    max-width: calc(100% - 32px); padding: 12px 16px; border-radius: 16px; background: #12142a; color: #fff;
+    width: max-content; max-width: calc(100vw - 32px); padding: 12px 16px; border-radius: 16px; background: var(--tip-bg); color: #fff;
     font-size: 0.88rem; font-weight: 600; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.3);
   }
   @media (max-width: 420px) {

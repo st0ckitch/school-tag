@@ -59,7 +59,7 @@ const compact = (v) => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1).re
 function areaChart({ id, points, unit, caption }) {
   const W = 720;
   const H = 270;
-  const padL = 40;
+  const padL = 48;
   const padR = 14;
   const padT = 14;
   const padB = 30;
@@ -134,9 +134,12 @@ function areaChart({ id, points, unit, caption }) {
       for (var i = 1; i < pts.length; i++) if (Math.abs(pts[i].x - fx) < Math.abs(pts[best].x - fx)) best = i;
       return best;
     }
+    var pointer = false;
+    fig.addEventListener('pointerdown', function (e) { pointer = true; show(nearest(e.clientX)); });
     fig.addEventListener('pointermove', function (e) { show(nearest(e.clientX)); });
     fig.addEventListener('pointerleave', function () { if (document.activeElement !== fig) fig.classList.remove('hovering'); });
-    fig.addEventListener('focus', function () { show(cur); });
+    // Keyboard focus starts at the latest day; a tap shows the day tapped.
+    fig.addEventListener('focus', function () { if (!pointer) show(cur); pointer = false; });
     fig.addEventListener('blur', function () { fig.classList.remove('hovering'); });
     fig.addEventListener('keydown', function (e) {
       if (e.key === 'ArrowLeft') { e.preventDefault(); show(cur - 1); }
@@ -153,15 +156,18 @@ function areaChart({ id, points, unit, caption }) {
 
 // Stat-tile trend: the whole run in the quiet gray, the current period (the
 // last `current` points) in the accent. Days without data are skipped.
-function sparkline(values, current = 7) {
+function sparkline(values, current = 7, domain = null) {
   const W = 120;
   const H = 44;
   const pad = 5;
   const defined = values.map((v, i) => [i, v]).filter(([, v]) => v !== null && v !== undefined);
   if (defined.length < 2) return `<svg class="spark" viewBox="0 0 ${W} ${H}" aria-hidden="true"></svg>`;
   const vals = defined.map(([, v]) => v);
-  const lo = Math.min(...vals);
-  const hi = Math.max(...vals);
+  // A fixed domain (e.g. 0–100 for percentages) keeps small dips small;
+  // otherwise pad the data range so the line never touches the edges.
+  const spread = Math.max(...vals) - Math.min(...vals) || 1;
+  const lo = domain ? domain[0] : Math.min(...vals) - spread * 0.25;
+  const hi = domain ? domain[1] : Math.max(...vals) + spread * 0.25;
   const span = hi - lo || 1;
   const x = (i) => pad + (i * (W - 2 * pad)) / Math.max(1, values.length - 1);
   const y = (v) => H - pad - ((v - lo) / span) * (H - 2 * pad);
