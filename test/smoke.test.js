@@ -1177,3 +1177,35 @@ test('a hanging push service does not hold back the missed-checkpoints email', a
     silent.close();
   }
 });
+
+test('Settings shows what happened to the last notification email', async () => {
+  const { sendEmail } = require('../src/notify');
+  const cookie = await adminCookie();
+  const settingsPage = async () => (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
+  await withBrevo('a@example.com, b@example.com', async () => {
+    let brevo = stubBrevo({ 'b@example.com': 'Invalid recipient' });
+    try {
+      await sendEmail('⚠️ School security: checkpoints missed', 'Body');
+    } finally {
+      brevo.restore();
+    }
+    let page = await settingsPage();
+    assert.match(page, /Last notification email: .*checkpoints missed/);
+    assert.match(page, /✕ sent to a@example\.com, but not sent to b@example\.com — Brevo: Invalid recipient/);
+
+    brevo = stubBrevo();
+    try {
+      await sendEmail('✅ School security: walkthrough completed', 'Body');
+    } finally {
+      brevo.restore();
+    }
+    page = await settingsPage();
+    assert.match(page, /walkthrough completed.*✓ accepted for a@example\.com, b@example\.com/);
+    assert.doesNotMatch(page, /free-mail address/);
+
+    await db.setSetting('brevo_from_email', 'someone@gmail.com');
+    page = await settingsPage();
+    assert.match(page, /The From address someone@gmail\.com is a free-mail address/);
+  });
+  await db.setSetting('email_last_result', '');
+});

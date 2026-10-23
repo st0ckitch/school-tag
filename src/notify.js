@@ -36,7 +36,27 @@ async function getVapidKeys() {
 //  - SMTP (e.g. Gmail with an App Password): free, works with any mailbox.
 // Each recipient gets their own copy, sent in parallel, so one bad address
 // can't stop the others and nobody sees who else was notified.
+// The outcome is kept so the Settings page can show what happened last.
 async function sendEmail(subject, text) {
+  const result = await attemptEmail(subject, text);
+  try {
+    const last = { at: new Date().toISOString(), subject, ok: result.ok, sent: result.sent || [], error: result.error || '' };
+    await setSetting('email_last_result', JSON.stringify(last));
+  } catch (err) {
+    console.error('[email] could not record the result:', err.message);
+  }
+  return result;
+}
+
+async function lastEmailResult() {
+  try {
+    return JSON.parse((await getSetting('email_last_result')) || 'null');
+  } catch (err) {
+    return null;
+  }
+}
+
+async function attemptEmail(subject, text) {
   const { valid: recipients, invalid } = parseRecipients(await getSetting('notify_email'));
   const apiKey = ((await getSetting('mailchimp_api_key')) || '').trim();
   const brevoKey = ((await getSetting('brevo_api_key')) || '').trim();
@@ -348,4 +368,4 @@ async function sendNotification(title, message, priority = 'high') {
   return results;
 }
 
-module.exports = { sendNotification, sendEmail, getVapidKeys, parseRecipients };
+module.exports = { sendNotification, sendEmail, lastEmailResult, getVapidKeys, parseRecipients };

@@ -27,7 +27,7 @@ const {
   alertsForWalkthrough,
 } = require('../db');
 const { tick } = require('../scheduler');
-const { sendEmail, parseRecipients } = require('../notify');
+const { sendEmail, lastEmailResult, parseRecipients } = require('../notify');
 const { resetInfo } = require('../school-checkpoints');
 const { esc, page } = require('../html');
 
@@ -856,6 +856,12 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const brevoFromEmail = (await getSetting('brevo_from_email')) || '';
   const emailTest = await readFlash(req, 'email_test');
   const settingsErr = await readFlash(req, 'settings_err');
+  const lastEmail = await lastEmailResult();
+  // Mail claiming a free-mail From address but sent by another service is
+  // often rejected or filed as spam by Gmail and others (DMARC).
+  const freeMailFrom = [brevoFromEmail, mailchimpFromEmail].find((a) =>
+    /@(gmail\.com|googlemail\.com|yahoo\.[a-z.]+|ymail\.com|outlook\.com|hotmail\.[a-z.]+|live\.com|icloud\.com|me\.com|aol\.com|mail\.(com|ru))$/i.test(a.trim())
+  );
   res.send(
     adminPage(
       'Settings — School Tag',
@@ -879,6 +885,8 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <p class="muted">A summary email is sent when a walkthrough is <b>completed</b>, and an alert email when checkpoints are <b>missed</b>. Fill in one way of sending below: Mailchimp Transactional, Brevo or SMTP.</p>
            ${emailTest ? (emailTest === 'ok' || emailTest.startsWith('ok:') ? `<p class="ok">✓ Test email sent${emailTest.length > 3 ? ` to ${esc(emailTest.slice(3))}` : ''} — check the inbox (and the spam folder).</p>` : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
            ${settingsErr ? `<p class="bad">✕ ${esc(settingsErr)}</p>` : ''}
+           ${lastEmail ? `<p class="muted" style="font-size:.85rem">Last notification email: ${fmtTime(lastEmail.at)} · “${esc(lastEmail.subject)}” — ${lastEmail.ok ? `<span class="ok">✓ accepted for ${esc(lastEmail.sent.join(', '))}</span>` : `<span class="bad">✕ ${esc(lastEmail.error)}</span>`}<br>“Accepted” means the email service took it. If it still doesn't arrive, check the Spam folder and the service's sending logs (Brevo: Transactional → Logs).</p>` : ''}
+           ${freeMailFrom ? `<p class="warn" style="font-size:.85rem">⚠ The From address ${esc(freeMailFrom.trim())} is a free-mail address. Gmail and others often reject or spam mail that claims such an address but is sent by Brevo or Mailchimp. Verify your own domain with the email service and use an address on it (e.g. security@your-school.ge).</p>` : ''}
            <label for="notify_email">Send notifications to these emails — separate several with commas</label>
            <input id="notify_email" name="notify_email" type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(notifyEmail)}" placeholder="director@myschool.ge, deputy@myschool.ge">
            <label for="mailchimp_api_key">Mailchimp Transactional API key</label>
