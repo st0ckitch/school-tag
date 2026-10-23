@@ -605,7 +605,7 @@ const GUARD_SCRIPT = `
           var code = chipCode(new TextDecoder().decode(r.data));
           // The chip this page is about is usually still in range when the
           // page starts listening; reading it again must not reload the page.
-          if (code && location.pathname === '/t/' + code) { say('✓ უკვე ჩაწერილია · Already recorded.'); return; }
+          if (code && location.pathname.replace(/\\/link$/, '') === '/t/' + code) { say('ეს ტეგი უკვე გახსნილია · This chip is already open.'); return; }
           if (code) { location.href = '/t/' + code; return; }
         }
         say('ეს ტეგი სისტემის არ არის · Not a School Tag chip.');
@@ -639,7 +639,11 @@ const GUARD_SCRIPT = `
     }
   };
   var tapId = String(Date.now()) + Math.random();
-  if (isTap) channel.postMessage({ type: 'tap', path: location.pathname, id: tapId });
+  if (isTap) {
+    channel.postMessage({ type: 'tap', path: location.pathname, id: tapId });
+    // Nobody took it: this tab is now the open guard tab for later taps.
+    setTimeout(function () { isTap = false; }, 1500);
+  }
 })();
 `;
 
