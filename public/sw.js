@@ -4,14 +4,12 @@
 // Push notifications. Guard/admin pages are NEVER cached — recording a scan
 // requires the network.
 
-const CACHE = 'school-tag-v2';
+const CACHE = 'school-tag-v3';
 const OFFLINE_URL = '/offline.html';
 const PRECACHE = [
   OFFLINE_URL,
-  '/fonts/FiraGO-Regular.woff2',
-  '/fonts/FiraGO-SemiBold.woff2',
-  '/fonts/FiraGO-Bold.woff2',
-  '/fonts/FiraGO-ExtraBold.woff2',
+  '/fonts/NotoSansGeorgian.woff2',
+  '/fonts/PlusJakartaSans.woff2',
   '/icons/icon-192.png',
   '/icons/admin-192.png',
 ];

@@ -10,10 +10,12 @@ function esc(s) {
 }
 
 const CSS = `
-  @font-face { font-family: 'FiraGO'; src: url('/fonts/FiraGO-Regular.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
-  @font-face { font-family: 'FiraGO'; src: url('/fonts/FiraGO-SemiBold.woff2') format('woff2'); font-weight: 600; font-style: normal; font-display: swap; }
-  @font-face { font-family: 'FiraGO'; src: url('/fonts/FiraGO-Bold.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
-  @font-face { font-family: 'FiraGO'; src: url('/fonts/FiraGO-ExtraBold.woff2') format('woff2'); font-weight: 800; font-style: normal; font-display: swap; }
+  /* One family from two variable fonts: Plus Jakarta Sans draws Latin and
+     digits, Noto Sans Georgian draws Georgian (both SIL OFL, self-hosted). */
+  @font-face { font-family: 'ST Sans'; src: url('/fonts/PlusJakartaSans.woff2') format('woff2'); font-weight: 200 800; font-style: normal; font-display: swap;
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+  @font-face { font-family: 'ST Sans'; src: url('/fonts/NotoSansGeorgian.woff2') format('woff2'); font-weight: 100 900; font-style: normal; font-display: swap;
+    unicode-range: U+0589, U+10A0-10FF, U+1C90-1CBA, U+1CBD-1CBF, U+205A, U+2D00-2D2F, U+2E31; }
   :root {
     --bg: #eef2f9;
     --glow-1: rgba(99, 102, 241, 0.16);
@@ -53,7 +55,7 @@ const CSS = `
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font-family: 'FiraGO', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Georgian", sans-serif;
+    font-family: 'ST Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Georgian", sans-serif;
     font-size: 16px; line-height: 1.55; min-height: 100vh;
     -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;
   }
@@ -180,7 +182,8 @@ function page(title, body, opts = {}) {
   <link rel="manifest" href="${opts.admin ? '/manifest-admin.webmanifest' : '/manifest.webmanifest'}">
   <link rel="apple-touch-icon" href="${opts.admin ? '/icons/admin-180.png' : '/icons/icon-180.png'}">
   <link rel="icon" type="image/png" sizes="192x192" href="${opts.admin ? '/icons/admin-192.png' : '/icons/icon-192.png'}">
-  <link rel="preload" href="/fonts/FiraGO-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/NotoSansGeorgian.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/PlusJakartaSans.woff2" as="font" type="font/woff2" crossorigin>
   ${refresh}
   <title>${esc(title)}</title>
   <style>${CSS}</style>
