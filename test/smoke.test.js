@@ -962,3 +962,145 @@ test('an empty checkpoint list is filled with the 21 school checkpoints, once', 
   );
   assert.equal((await db.listCheckpoints()).length, 20);
 });
+
+// Stubs the Brevo API; `fail` maps an address to the error message Brevo
+// should answer with for it.
+function stubBrevo(fail = {}) {
+  const captured = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (!String(url).includes('api.brevo.com')) return realFetch(url, opts);
+    const body = JSON.parse(opts.body);
+    captured.push(body);
+    const to = body.to.map((r) => r.email).join(',');
+    if (fail[to]) return new Response(JSON.stringify({ message: fail[to] }), { status: 400 });
+    return new Response(JSON.stringify({ messageId: `id-${to}` }), { status: 201 });
+  };
+  return { captured, restore: () => (global.fetch = realFetch) };
+}
+
+async function withBrevo(recipients, fn) {
+  await db.setSetting('notify_email', recipients);
+  await db.setSetting('brevo_api_key', 'xkeysib-test');
+  await db.setSetting('brevo_from_email', 'security@example.com');
+  try {
+    await fn();
+  } finally {
+    await db.setSetting('notify_email', '');
+    await db.setSetting('brevo_api_key', '');
+    await db.setSetting('brevo_from_email', '');
+  }
+}
+
+test('every listed address gets its own copy of a notification', async () => {
+  const { sendEmail } = require('../src/notify');
+  await withBrevo('Mamuka.tsiklauri@bga.ge, artyomananov@gmail.com', async () => {
+    const brevo = stubBrevo();
+    try {
+      const result = await sendEmail('Subject', 'Body');
+      assert.equal(result.ok, true);
+      assert.deepEqual(result.sent, ['Mamuka.tsiklauri@bga.ge', 'artyomananov@gmail.com']);
+      assert.deepEqual(
+        brevo.captured.map((b) => b.to.map((r) => r.email)),
+        [['Mamuka.tsiklauri@bga.ge'], ['artyomananov@gmail.com']]
+      );
+    } finally {
+      brevo.restore();
+    }
+  });
+});
+
+test('one failing address does not stop the others, and the error names it', async () => {
+  const { sendEmail } = require('../src/notify');
+  await withBrevo('a@example.com; b@example.com', async () => {
+    const brevo = stubBrevo({ 'b@example.com': 'Invalid recipient' });
+    try {
+      const result = await sendEmail('Subject', 'Body');
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.sent, ['a@example.com']);
+      assert.match(result.error, /sent to a@example\.com, but not sent to b@example\.com — Brevo: Invalid recipient/);
+    } finally {
+      brevo.restore();
+    }
+  });
+  // The same failure for everyone is reported once, as before.
+  await withBrevo('a@example.com, b@example.com', async () => {
+    const brevo = stubBrevo({ 'a@example.com': 'Key not found', 'b@example.com': 'Key not found' });
+    try {
+      const result = await sendEmail('Subject', 'Body');
+      assert.equal(result.ok, false);
+      assert.equal(result.error, 'Brevo: Key not found');
+    } finally {
+      brevo.restore();
+    }
+  });
+});
+
+test('a completed round emails every listed address', async () => {
+  await withBrevo('a@example.com, b@example.com', async () => {
+    const brevo = stubBrevo();
+    try {
+      const w = await db.startWalkthrough('MultiGuard');
+      for (const cp of await db.listCheckpoints(true)) await db.recordScan(w.id, cp.id);
+      const res = await fetch(`${base}/walkthrough/finish`, { method: 'POST', redirect: 'follow' });
+      assert.equal(res.status, 200);
+      assert.equal((await db.getWalkthrough(w.id)).status, 'completed');
+      assert.deepEqual(brevo.captured.map((b) => b.to[0].email).sort(), ['a@example.com', 'b@example.com']);
+      assert.ok(brevo.captured.every((b) => /completed/.test(b.subject) && /MultiGuard/.test(b.textContent)));
+    } finally {
+      brevo.restore();
+    }
+  });
+});
+
+test('settings take several notification emails and refuse a bad one', async () => {
+  const cookie = await adminCookie();
+  const post = (path, value) =>
+    fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ notify_email: value }).toString(),
+      redirect: 'manual',
+    });
+  try {
+    let res = await post('/admin/settings', ' Mamuka.tsiklauri@bga.ge;artyomananov@gmail.com\n mamuka.TSIKLAURI@bga.ge ');
+    assert.equal(res.headers.get('location'), '/admin/settings');
+    assert.equal(await db.getSetting('notify_email'), 'Mamuka.tsiklauri@bga.ge, artyomananov@gmail.com');
+    let page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
+    assert.match(page, /value="Mamuka\.tsiklauri@bga\.ge, artyomananov@gmail\.com"/);
+    assert.match(page, /type="email" multiple/);
+
+    res = await post('/admin/settings', 'ok@example.com, not-an-email');
+    assert.equal(await db.getSetting('notify_email'), 'Mamuka.tsiklauri@bga.ge, artyomananov@gmail.com', 'kept as it was');
+    page = await (await fetch(`${base}${res.headers.get('location')}`, { headers: { Cookie: cookie } })).text();
+    assert.match(page, /Email list not saved — not a valid email address: not-an-email/);
+
+    // The test button reports who got the email.
+    await db.setSetting('brevo_api_key', 'xkeysib-test');
+    await db.setSetting('brevo_from_email', 'security@example.com');
+    const brevo = stubBrevo();
+    try {
+      res = await post('/admin/settings/test-email', 'a@example.com, b@example.com');
+      assert.equal(brevo.captured.length, 2);
+    } finally {
+      brevo.restore();
+    }
+    page = await (await fetch(`${base}${res.headers.get('location')}`, { headers: { Cookie: cookie } })).text();
+    assert.match(page, /Test email sent to a@example\.com, b@example\.com/);
+
+    // A bad address stops the test before anything is sent.
+    const none = stubBrevo();
+    try {
+      res = await post('/admin/settings/test-email', 'a@example.com, oops');
+      assert.equal(none.captured.length, 0);
+    } finally {
+      none.restore();
+    }
+    page = await (await fetch(`${base}${res.headers.get('location')}`, { headers: { Cookie: cookie } })).text();
+    assert.match(page, /Test failed: Email list not saved — not a valid email address: oops/);
+  } finally {
+    await db.setSetting('notify_email', '');
+    await db.setSetting('brevo_api_key', '');
+    await db.setSetting('brevo_from_email', '');
+  }
+});

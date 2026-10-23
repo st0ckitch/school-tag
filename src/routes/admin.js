@@ -27,7 +27,7 @@ const {
   alertsForWalkthrough,
 } = require('../db');
 const { tick } = require('../scheduler');
-const { sendEmail } = require('../notify');
+const { sendEmail, parseRecipients } = require('../notify');
 const { resetInfo } = require('../school-checkpoints');
 const { esc, page } = require('../html');
 
@@ -855,6 +855,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const brevoApiKey = (await getSetting('brevo_api_key')) || '';
   const brevoFromEmail = (await getSetting('brevo_from_email')) || '';
   const emailTest = await readFlash(req, 'email_test');
+  const settingsErr = await readFlash(req, 'settings_err');
   res.send(
     adminPage(
       'Settings — School Tag',
@@ -876,9 +877,10 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
          <div class="card">
            <h2>Email notifications (Mailchimp)</h2>
            <p class="muted">A summary email is sent when a walkthrough is <b>completed</b>, and an alert email when checkpoints are <b>missed</b>. Requires a <b>Mailchimp Transactional</b> (Mandrill) API key — regular Mailchimp campaign keys cannot send single emails.</p>
-           ${emailTest ? (emailTest === 'ok' ? '<p class="ok">✓ Test email sent — check the inbox.</p>' : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
-           <label for="notify_email">Send notifications to this email</label>
-           <input id="notify_email" name="notify_email" type="email" value="${esc(notifyEmail)}" placeholder="director@myschool.ge">
+           ${emailTest ? (emailTest.startsWith('ok:') ? `<p class="ok">✓ Test email sent to ${esc(emailTest.slice(3))} — check the inbox (and the spam folder).</p>` : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
+           ${settingsErr ? `<p class="bad">✕ ${esc(settingsErr)}</p>` : ''}
+           <label for="notify_email">Send notifications to these emails — separate several with commas</label>
+           <input id="notify_email" name="notify_email" type="email" multiple value="${esc(notifyEmail)}" placeholder="director@myschool.ge, deputy@myschool.ge">
            <label for="mailchimp_api_key">Mailchimp Transactional API key</label>
            <input id="mailchimp_api_key" name="mailchimp_api_key" type="password" value="${esc(mailchimpApiKey)}" placeholder="md-...">
            <label for="mailchimp_from_email">From address (must be on a domain verified in Mailchimp Transactional)</label>
@@ -932,28 +934,45 @@ const SETTINGS_KEYS = [
   'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from', 'brevo_api_key', 'brevo_from_email',
 ];
 
+// Saves every submitted setting except an email list with a bad address,
+// which is kept as it was; returns why, or '' when everything was saved.
 async function saveSettings(req) {
+  let error = '';
   for (const key of SETTINGS_KEYS) {
-    if (req.body[key] !== undefined) await setSetting(key, String(req.body[key]).trim());
+    if (req.body[key] === undefined) continue;
+    let value = String(req.body[key]).trim();
+    if (key === 'notify_email') {
+      const { valid, invalid } = parseRecipients(value);
+      if (invalid.length) {
+        error = `Email list not saved — not a valid email address: ${invalid.join(', ')}`;
+        continue;
+      }
+      value = valid.join(', ');
+    }
+    await setSetting(key, value);
   }
+  return error;
 }
 
 // Saves the submitted form first, then sends the test — so what you see in
 // the fields is exactly what gets tested.
 router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, res) => {
-  await saveSettings(req);
+  const saveError = await saveSettings(req);
+  if (saveError) return res.redirect(await flashUrl('/admin/settings', 'email_test', saveError));
   console.log('[email] test email requested from admin settings');
   const result = await sendEmail(
     'School Tag: test email',
     'This is a test email from your School Tag admin settings. If you can read this, email notifications are working.'
   );
   console.log('[email] test result:', result);
-  res.redirect(await flashUrl('/admin/settings', 'email_test', result.ok ? 'ok' : result.error || 'failed'));
+  res.redirect(
+    await flashUrl('/admin/settings', 'email_test', result.ok ? `ok:${result.sent.join(', ')}` : result.error || 'failed')
+  );
 }));
 
 router.post('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
-  await saveSettings(req);
-  res.redirect('/admin/settings');
+  const saveError = await saveSettings(req);
+  res.redirect(saveError ? await flashUrl('/admin/settings', 'settings_err', saveError) : '/admin/settings');
 }));
 
 // --- JSON state (for integrations / monitoring) ----------------------------

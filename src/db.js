@@ -90,6 +90,10 @@ const SCHEMA_STATEMENTS = [
 ];
 
 async function initSchema() {
+  // A local file can briefly be shared by two processes (e.g. old and new
+  // container during a deploy): wait for the other's write instead of
+  // failing with SQLITE_BUSY. The client keeps this one connection open.
+  if (!remoteUrl) await client.execute('PRAGMA busy_timeout = 5000');
   await client.batch(SCHEMA_STATEMENTS, 'write');
   // Columns added after the first release:
   //  - linked: a physical chip has been bound to the checkpoint's code

@@ -33,8 +33,10 @@ async function getVapidKeys() {
 //    Mailchimp Marketing key (hex + '-usN') cannot send single emails, so it
 //    is rejected with an explanation instead of failing mysteriously.
 //  - SMTP (e.g. Gmail with an App Password): free, works with any mailbox.
+// Each recipient gets their own copy, sent in parallel, so one bad address
+// can't stop the others and nobody sees who else was notified.
 async function sendEmail(subject, text) {
-  const to = ((await getSetting('notify_email')) || '').trim();
+  const { valid: recipients, invalid } = parseRecipients(await getSetting('notify_email'));
   const apiKey = ((await getSetting('mailchimp_api_key')) || '').trim();
   const brevoKey = ((await getSetting('brevo_api_key')) || '').trim();
   const smtpUser = ((await getSetting('smtp_user')) || '').trim();
@@ -43,21 +45,27 @@ async function sendEmail(subject, text) {
   // Diagnostic snapshot (no secrets) — shows up in the host's deploy logs.
   console.log('[email] send requested:', {
     subject,
-    to: to || '(empty)',
+    to: recipients.length ? recipients.join(', ') : '(empty)',
+    ...(invalid.length ? { invalid } : {}),
     mailchimp_key: apiKey ? (apiKey.startsWith('md-') ? 'transactional' : 'marketing-type (unusable)') : '(empty)',
     brevo_key: brevoKey ? `set (${brevoKey.length} chars)` : '(empty)',
     smtp_user: smtpUser || '(empty)',
     smtp_pass: smtpPass ? `set (${smtpPass.length} chars)` : '(empty)',
   });
 
-  if (!to) {
+  if (!recipients.length) {
+    if (invalid.length) {
+      console.error('[email] aborted: no valid recipient address');
+      return { ok: false, error: `not a valid email address: ${invalid.join(', ')}` };
+    }
     console.error('[email] aborted: recipient email not set');
     return { ok: false, error: 'recipient email not set' };
   }
+  const toAll = (send) => sendToEach(recipients, invalid, send);
 
   if (apiKey.startsWith('md-')) {
     console.log('[email] channel: Mailchimp Transactional');
-    return sendViaMandrill(to, apiKey, subject, text);
+    return toAll((to) => sendViaMandrill(to, apiKey, subject, text));
   }
   if (brevoKey) {
     if (brevoKey.startsWith('xsmtpsib-')) {
@@ -70,11 +78,11 @@ async function sendEmail(subject, text) {
       };
     }
     console.log('[email] channel: Brevo (HTTPS)');
-    return sendViaBrevo(to, brevoKey, subject, text);
+    return toAll((to) => sendViaBrevo(to, brevoKey, subject, text));
   }
   if (smtpUser && smtpPass) {
     console.log('[email] channel: SMTP');
-    return sendViaSmtp(to, smtpUser, smtpPass, subject, text);
+    return toAll((to) => sendViaSmtp(to, smtpUser, smtpPass, subject, text));
   }
   console.error('[email] aborted: no usable channel configured');
   if (apiKey) {
@@ -86,6 +94,43 @@ async function sendEmail(subject, text) {
     };
   }
   return { ok: false, error: 'email not configured' };
+}
+
+// The notification addresses: one or more, separated by commas, semicolons,
+// spaces or new lines. Repeats (in any letter case) count once.
+const EMAIL_RE = /^[^\s@,;<>()"]+@[^\s@,;<>()"]+\.[^\s@,;<>()".]+$/;
+function parseRecipients(value) {
+  const valid = [];
+  const invalid = [];
+  const seen = new Set();
+  for (const part of String(value || '').split(/[\s,;]+/)) {
+    if (!part || seen.has(part.toLowerCase())) continue;
+    seen.add(part.toLowerCase());
+    (EMAIL_RE.test(part) ? valid : invalid).push(part);
+  }
+  return { valid, invalid };
+}
+
+// One send per recipient. Succeeds only when every address got its copy;
+// otherwise the error says who got it and why the others didn't.
+async function sendToEach(recipients, invalid, send) {
+  const results = await Promise.all(recipients.map(async (to) => ({ to, ...(await send(to)) })));
+  const sent = results.filter((r) => r.ok).map((r) => r.to);
+  const failed = results.filter((r) => !r.ok);
+  if (!failed.length && !invalid.length) return { ok: true, sent };
+  // The same failure for everyone is a setup problem, not an address one.
+  if (!sent.length && !invalid.length && failed.every((r) => r.error === failed[0].error)) {
+    return { ok: false, sent, error: failed[0].error };
+  }
+  const problems = [
+    ...failed.map((r) => `${r.to} — ${r.error}`),
+    ...invalid.map((a) => `${a} — not a valid email address`),
+  ];
+  return {
+    ok: false,
+    sent,
+    error: (sent.length ? `sent to ${sent.join(', ')}, but ` : '') + `not sent to ${problems.join('; ')}`,
+  };
 }
 
 async function sendViaMandrill(to, apiKey, subject, text) {
@@ -273,4 +318,4 @@ async function sendNotification(title, message, priority = 'high') {
   return results;
 }
 
-module.exports = { sendNotification, sendEmail, getVapidKeys };
+module.exports = { sendNotification, sendEmail, getVapidKeys, parseRecipients };
