@@ -34,6 +34,7 @@ const { sendEmail, lastEmailResult, emailLog, parseRecipients } = require('../no
 const { resetInfo } = require('../school-checkpoints');
 const { esc, page, icon, ring, place } = require('../html');
 const { areaChart, sparkline } = require('../charts');
+const { testEmail } = require('../email-template');
 
 const router = express.Router();
 
@@ -1193,10 +1194,8 @@ router.post('/admin/settings/test-email', wrap(requireAdmin), wrap(async (req, r
   const saveError = await saveSettings(req);
   if (saveError) return res.redirect((await flashUrl('/admin/settings', 'email_test', saveError)) + '#email-settings');
   console.log('[email] test email requested from admin settings');
-  const result = await sendEmail(
-    'School Tag: test email',
-    'This is a test email from your School Tag admin settings. If you can read this, email notifications are working.'
-  );
+  const email = testEmail();
+  const result = await sendEmail(email.subject, email.text, email.html);
   console.log('[email] test result:', result);
   const flash = await flashUrl('/admin/settings', 'email_test', result.ok ? `ok:${result.sent.join(', ')}` : result.error || 'failed');
   res.redirect(flash + '#email-settings');

@@ -290,8 +290,9 @@ test('completion email is sent via Mailchimp Transactional', async () => {
     assert.equal(captured[0].key, 'md-test');
     assert.equal(captured[0].message.to[0].email, 'director@example.com');
     assert.equal(captured[0].message.from_email, 'security@example.com');
-    assert.match(captured[0].message.subject, /completed/);
+    assert.match(captured[0].message.subject, /შემოვლა დასრულდა/);
     assert.match(captured[0].message.text, /EmailGuard/);
+    assert.match(captured[0].message.html, /<html lang="ka">/);
   } finally {
     global.fetch = realFetch;
     await db.setSetting('notify_email', '');
@@ -1044,7 +1045,7 @@ test('a completed round emails every listed address', async () => {
       assert.equal(res.status, 200);
       assert.equal((await db.getWalkthrough(w.id)).status, 'completed');
       assert.deepEqual(brevo.captured.map((b) => b.to[0].email).sort(), ['a@example.com', 'b@example.com']);
-      assert.ok(brevo.captured.every((b) => /completed/.test(b.subject) && /MultiGuard/.test(b.textContent)));
+      assert.ok(brevo.captured.every((b) => /შემოვლა დასრულდა/.test(b.subject) && /MultiGuard/.test(b.textContent) && /MultiGuard/.test(b.htmlContent)));
     } finally {
       brevo.restore();
     }
@@ -1341,4 +1342,34 @@ test('guard pages keep chip taps in one tab', async () => {
     const manifest = await (await fetch(`${base}/${m}.webmanifest`)).json();
     assert.deepEqual(manifest.launch_handler, { client_mode: ['navigate-existing', 'auto'] }, m);
   }
+});
+
+test('the round email is Georgian HTML listing scanned and missed checkpoints', async () => {
+  const { roundEmail } = require('../src/email-template');
+  const walkthrough = { id: 'w1', guard_name: 'გიორგი', started_at: '2026-10-23T08:00:00.000Z' };
+  const scans = [
+    { checkpoint_id: 'aa000001', checkpoint_name: 'სპოტკაფე', checkpoint_location: 'სპოტკაფე', scanned_at: '2026-10-23T08:05:00.000Z' },
+    { checkpoint_id: 'aa000002', checkpoint_name: 'Room <b>5</b>', checkpoint_location: '2nd floor', scanned_at: '2026-10-23T08:09:00.000Z' },
+  ];
+  const missing = [{ name: 'ჭადრაკის ეზო', location: '' }];
+  const e = roundEmail({ walkthrough, scans, missing, reason: 'finished early by guard', endedAt: '2026-10-23T08:40:00.000Z', detailsUrl: 'https://x.example/admin/history/w1' });
+  assert.match(e.subject, /არ დასკანირებულა 1 წერტილი \(2\/3\)/);
+  for (const part of [e.text, e.html]) {
+    assert.match(part, /უსაფრთხოების თანამშრომელმა დაასრულა შემოვლა\./);
+    assert.match(part, /ჭადრაკის ეზო/);
+    assert.match(part, /სპოტკაფე/);
+    assert.match(part, /გიორგი/);
+    assert.match(part, /40 წთ/);
+  }
+  assert.match(e.text, /დასკანირებულია: 2 წერტილი\nარ დასკანირებულა: 1 წერტილი/);
+  assert.match(e.text, /✓ სპოტკაფე — 12:05/, 'scan time in local time; a location equal to the name is not repeated');
+  assert.match(e.text, /✕ ჭადრაკის ეზო/);
+  assert.match(e.html, /Room &lt;b&gt;5&lt;\/b&gt; — 2nd floor/, 'names are escaped in HTML');
+  assert.doesNotMatch(e.html, /<b>5<\/b>/);
+  assert.match(e.html, /href="https:\/\/x\.example\/admin\/history\/w1"/);
+  const done = roundEmail({ walkthrough, scans, missing: [], reason: 'completed', endedAt: '2026-10-23T08:40:00.000Z' });
+  assert.match(done.subject, /შემოვლა დასრულდა — დასკანირებულია 2\/2/);
+  assert.doesNotMatch(done.html, /შემოვლის დეტალები/, 'no button without a public base URL');
+  const expired = roundEmail({ walkthrough, scans, missing, reason: 'time expired', endedAt: '2026-10-23T08:40:00.000Z' });
+  assert.match(expired.text, /^შემოვლის დრო ამოიწურა\./);
 });

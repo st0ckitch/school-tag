@@ -6,15 +6,26 @@ const {
   getScans,
   finishWalkthrough,
   addAlert,
+  getSetting,
 } = require('./db');
 const { sendNotification, sendEmail } = require('./notify');
+const { roundEmail } = require('./email-template');
 
-function fmtLocal(iso) {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleString('en-GB', {
-    dateStyle: 'short',
-    timeStyle: 'short',
-    timeZone: process.env.TZ || 'Asia/Tbilisi',
+// The Georgian summary email for a finished round: what was scanned (with
+// times) and what was not, linking to the round's page when the public base
+// URL is set.
+async function roundSummaryEmail(walkthrough, missing, reason) {
+  const scans = await getScans(walkthrough.id);
+  // Railway tells the service its public domain when Settings has no base URL.
+  const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
+  const base = ((await getSetting('base_url')) || '').trim().replace(/\/+$/, '') || (domain ? `https://${domain}` : '');
+  return roundEmail({
+    walkthrough,
+    scans,
+    missing,
+    reason,
+    endedAt: new Date().toISOString(),
+    detailsUrl: base ? `${base}/admin/history/${encodeURIComponent(walkthrough.id)}` : '',
   });
 }
 
@@ -22,13 +33,8 @@ function fmtLocal(iso) {
 // Email failures are logged but never break the guard's flow.
 async function completeWalkthrough(walkthrough) {
   await finishWalkthrough(walkthrough.id, 'completed');
-  const scanned = (await getScans(walkthrough.id)).length;
-  const message =
-    `Walkthrough completed — all checkpoints scanned (${scanned}/${walkthrough.total_checkpoints}).\n` +
-    (walkthrough.guard_name ? `Guard: ${walkthrough.guard_name}\n` : '') +
-    `Started: ${fmtLocal(walkthrough.started_at)}\n` +
-    `Finished: ${fmtLocal(new Date().toISOString())}`;
-  const emailResult = await sendEmail('✅ School security: walkthrough completed', message);
+  const email = await roundSummaryEmail(walkthrough, [], 'completed');
+  const emailResult = await sendEmail(email.subject, email.text, email.html);
   console.log('[email] completion email:', emailResult.ok ? 'sent' : `FAILED — ${emailResult.error}`);
 }
 
@@ -46,11 +52,12 @@ async function closeIncomplete(walkthrough, reason) {
     (walkthrough.guard_name ? `\nGuard: ${walkthrough.guard_name}` : '');
 
   await addAlert(walkthrough.id, 'missed_checkpoints', message);
+  const summary = await roundSummaryEmail(walkthrough, missing, reason);
   // Push and email go out side by side, so a slow or failing push service
   // can't hold back the email.
   const [push, email] = await Promise.allSettled([
     sendNotification('⚠️ School security: checkpoints missed', message),
-    sendEmail('⚠️ School security: checkpoints missed', message),
+    sendEmail(summary.subject, summary.text, summary.html),
   ]);
   if (push.status === 'rejected') console.error('[notify] alert push failed:', push.reason);
   const alertEmailResult = email.status === 'fulfilled' ? email.value : { ok: false, error: String(email.reason) };

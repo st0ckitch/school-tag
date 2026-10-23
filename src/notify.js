@@ -38,8 +38,9 @@ async function getVapidKeys() {
 // Each recipient gets their own copy, sent in parallel, so one bad address
 // can't stop the others and nobody sees who else was notified.
 // The outcome is kept so the Settings page can show what happened last.
-async function sendEmail(subject, text) {
-  const result = await attemptEmail(subject, text);
+// `html` is optional; when given, mail apps show it and `text` is the fallback.
+async function sendEmail(subject, text, html) {
+  const result = await attemptEmail(subject, text, html);
   try {
     const at = new Date().toISOString();
     const last = { at, subject, ok: result.ok, sent: result.sent || [], error: result.error || '' };
@@ -72,7 +73,7 @@ async function lastEmailResult() {
   }
 }
 
-async function attemptEmail(subject, text) {
+async function attemptEmail(subject, text, html) {
   const { valid: recipients, invalid } = parseRecipients(await getSetting('notify_email'));
   const apiKey = ((await getSetting('mailchimp_api_key')) || '').trim();
   const brevoKey = ((await getSetting('brevo_api_key')) || '').trim();
@@ -102,7 +103,7 @@ async function attemptEmail(subject, text) {
 
   if (apiKey.startsWith('md-')) {
     console.log('[email] channel: Mailchimp Transactional');
-    return toAll('Mailchimp Transactional', (to) => sendViaMandrill(to, apiKey, subject, text));
+    return toAll('Mailchimp Transactional', (to) => sendViaMandrill(to, apiKey, subject, text, html));
   }
   if (brevoKey) {
     if (brevoKey.startsWith('xsmtpsib-')) {
@@ -115,11 +116,11 @@ async function attemptEmail(subject, text) {
       };
     }
     console.log('[email] channel: Brevo (HTTPS)');
-    return toAll('Brevo', (to) => sendViaBrevo(to, brevoKey, subject, text));
+    return toAll('Brevo', (to) => sendViaBrevo(to, brevoKey, subject, text, html));
   }
   if (smtpUser && smtpPass) {
     console.log('[email] channel: SMTP');
-    return toAll('SMTP', (to) => sendViaSmtp(to, smtpUser, smtpPass, subject, text));
+    return toAll('SMTP', (to) => sendViaSmtp(to, smtpUser, smtpPass, subject, text, html));
   }
   console.error('[email] aborted: no usable channel configured');
   if (apiKey) {
@@ -194,7 +195,7 @@ async function sendToEach(recipients, invalid, send, channel) {
   };
 }
 
-async function sendViaMandrill(to, apiKey, subject, text) {
+async function sendViaMandrill(to, apiKey, subject, text, html) {
   const from = ((await getSetting('mailchimp_from_email')) || '').trim();
   if (!from) return { ok: false, error: 'from address not set' };
 
@@ -210,6 +211,7 @@ async function sendViaMandrill(to, apiKey, subject, text) {
           to: [{ email: to, type: 'to' }],
           subject,
           text,
+          ...(html ? { html } : {}),
         },
       }),
       signal: AbortSignal.timeout(8000),
@@ -234,7 +236,7 @@ async function sendViaMandrill(to, apiKey, subject, text) {
 }
 
 // Brevo (brevo.com) HTTPS email API — works where hosts block SMTP ports.
-async function sendViaBrevo(to, apiKey, subject, text) {
+async function sendViaBrevo(to, apiKey, subject, text, html) {
   const from = ((await getSetting('brevo_from_email')) || '').trim();
   if (!from) return { ok: false, error: 'Brevo from address not set' };
   try {
@@ -246,6 +248,7 @@ async function sendViaBrevo(to, apiKey, subject, text) {
         to: [{ email: to }],
         subject,
         textContent: text,
+        ...(html ? { htmlContent: html } : {}),
       }),
       signal: AbortSignal.timeout(8000),
     });
@@ -264,7 +267,7 @@ async function sendViaBrevo(to, apiKey, subject, text) {
 }
 
 const SMTP_DEADLINE_MS = 10000;
-async function sendViaSmtp(to, user, pass, subject, text) {
+async function sendViaSmtp(to, user, pass, subject, text, html) {
   const host = ((await getSetting('smtp_host')) || '').trim() || 'smtp.gmail.com';
   const port = parseInt(await getSetting('smtp_port'), 10) || 465;
   const from = ((await getSetting('smtp_from')) || '').trim() || user;
@@ -310,7 +313,7 @@ async function sendViaSmtp(to, user, pass, subject, text) {
       timer.unref();
     });
     try {
-      await Promise.race([transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text }), deadline]);
+      await Promise.race([transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text, ...(html ? { html } : {}) }), deadline]);
     } finally {
       clearTimeout(timer);
     }
