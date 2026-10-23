@@ -120,6 +120,21 @@ Admin → **Settings**:
 
 Duplicate taps are ignored; tag order doesn't matter.
 
+### 4a. One tab, not a tab per chip
+
+Tapping a chip normally makes the phone open its link in a **new** browser
+tab, so tabs pile up during a round. To avoid that:
+
+- **Android (Chrome):** open the guard page once and press **NFC · Scan
+  here** at the top, then allow NFC. From then on the open page reads the
+  chips itself and every tap opens in that same tab (the button shows
+  **NFC ჩართულია · On**). Keep the screen on and the page in front.
+- **Anywhere else:** if a tap still opens a new tab while the guard page is
+  open in another tab, the new tab passes the scan to the open one and
+  closes itself.
+- Installed as an app (below), the app reuses its window instead of opening
+  new ones.
+
 ### 5. Install it as an app on the phones (PWA)
 
 There are **two separate installable apps** on the same server — no app store

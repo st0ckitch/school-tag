@@ -496,6 +496,43 @@ async function listWalkthroughs(limit = 30) {
   return rs.rows;
 }
 
+// --- dashboard statistics ---------------------------------------------------
+
+// Rounds started since a moment, with how many checkpoints each recorded
+// and when its last scan was.
+async function walkthroughsSince(sinceIso) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: `SELECT w.*,
+              (SELECT COUNT(*) FROM scans s WHERE s.walkthrough_id = w.id) AS scanned_count,
+              (SELECT MAX(s.scanned_at) FROM scans s WHERE s.walkthrough_id = w.id) AS last_scan_at
+       FROM walkthroughs w WHERE w.started_at >= ? ORDER BY w.started_at DESC`,
+    args: [sinceIso],
+  });
+  return rs.rows;
+}
+
+async function scanTimesSince(sinceIso) {
+  await ensureReady();
+  const rs = await client.execute({ sql: 'SELECT scanned_at FROM scans WHERE scanned_at >= ?', args: [sinceIso] });
+  return rs.rows.map((r) => r.scanned_at);
+}
+
+// Active checkpoints most often left unscanned by rounds that ended
+// incomplete — counting only rounds that began after the checkpoint existed.
+async function mostMissedCheckpoints(sinceIso, limit = 5) {
+  await ensureReady();
+  const rs = await client.execute({
+    sql: `SELECT c.id, c.name, c.location, COUNT(*) AS missed
+       FROM walkthroughs w JOIN checkpoints c ON c.active = 1 AND c.created_at <= w.started_at
+       WHERE w.status = 'incomplete' AND w.started_at >= ?
+         AND NOT EXISTS (SELECT 1 FROM scans s WHERE s.walkthrough_id = w.id AND s.checkpoint_id = c.id)
+       GROUP BY c.id ORDER BY missed DESC, c.sort_order, c.name LIMIT ?`,
+    args: [sinceIso, limit],
+  });
+  return rs.rows;
+}
+
 async function getWalkthrough(id) {
   await ensureReady();
   const rs = await client.execute({ sql: 'SELECT * FROM walkthroughs WHERE id = ?', args: [id] });
@@ -670,6 +707,9 @@ module.exports = {
   getMissingCheckpoints,
   finishWalkthrough,
   listWalkthroughs,
+  walkthroughsSince,
+  scanTimesSince,
+  mostMissedCheckpoints,
   getWalkthrough,
   addAlert,
   listAlerts,

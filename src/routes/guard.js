@@ -25,7 +25,7 @@ const { tick, closeIncomplete, completeWalkthrough } = require('../scheduler');
 const { requireDevice, deviceCookieHeader } = require('../device');
 const { hasSession } = require('./admin');
 const { previousNameForCode } = require('../school-checkpoints');
-const { esc, page } = require('../html');
+const { esc, page, icon, ring, place } = require('../html');
 
 const router = express.Router();
 
@@ -36,61 +36,80 @@ function minutesLeft(walkthrough) {
   return Math.max(0, Math.round((new Date(walkthrough.deadline).getTime() - Date.now()) / 60000));
 }
 
+const TZ = process.env.TZ || 'Asia/Tbilisi';
+const clock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+
+// A big button labelled in Georgian with the English underneath.
+const biButton = (ka, en, cls = '') => `<button class="btn full two ${cls}" type="submit"><span>${ka}</span><span class="en">${en}</span></button>`;
+
+// A Georgian heading with its English line.
+const biTitle = (ka, en, tag = 'h1') => `<${tag}>${ka}</${tag}><div class="sub">${en}</div>`;
+
 async function progressView(walkthrough, justScanned) {
   const scans = await getScans(walkthrough.id);
   const missing = await getMissingCheckpoints(walkthrough.id);
   const total = scans.length + missing.length;
-  const pct = total === 0 ? 100 : Math.round((scans.length / total) * 100);
   const timeInfo = walkthrough.deadline
-    ? `დარჩენილი დრო / Time left: ${minutesLeft(walkthrough)} წთ/min`
-    : 'დროის ლიმიტის გარეშე / No time limit';
+    ? `<span class="pill warn wrap">${icon('timer')}${minutesLeft(walkthrough)} წთ · min left</span>`
+    : `<span class="pill wrap">${icon('timer')}დროის ლიმიტის გარეშე · No time limit</span>`;
 
   const scannedBanner = justScanned
-    ? `<div class="card" style="border-color:#16a34a">
-         <div class="big ok">✓ ${esc(justScanned.name)}</div>
-         <div class="muted">${esc(justScanned.location || '')}</div>
-         <div>დაფიქსირდა / Checkpoint recorded</div>
+    ? `<div class="card scan-hero">
+         <span class="tile green">${icon('check')}</span>
+         <div class="stat-label">დაფიქსირდა · Checkpoint recorded</div>
+         <h1 style="margin-top:4px">${place(justScanned.name, justScanned.location)}</h1>
        </div>`
     : '';
 
-  const missingList = missing.length
+  const remaining = missing.length
     ? `<div class="card">
-         <h2>დარჩენილია / Remaining (${missing.length})</h2>
-         <ul class="plain">
-           ${missing
-             .map(
-               (c) =>
-                 `<li><span>${esc(c.name)}${c.location ? ` <span class="muted">— ${esc(c.location)}</span>` : ''}</span><span class="muted">…</span></li>`
-             )
-             .join('')}
+         <h2>დარჩენილია · Remaining <span class="pill info">${missing.length}</span></h2>
+         <ul class="plain cp-list">
+           ${missing.map((c) => `<li><span class="cp-name">${place(c.name, c.location)}</span><span class="cp-state">${icon('pin')}</span></li>`).join('')}
          </ul>
        </div>`
-    : `<div class="card">
-         <div class="big ok">ყველა წერტილი შემოწმებულია!</div>
-         <div>All checkpoints scanned — walkthrough complete.</div>
-         <form method="post" action="/walkthrough/finish" style="margin-top:12px">
-           <button class="btn full" type="submit">დასრულება / Finish walkthrough</button>
+    : `<div class="card scan-hero">
+         <span class="tile green">${icon('checkCircle')}</span>
+         ${biTitle('ყველა წერტილი შემოწმებულია!', 'All checkpoints scanned — finish the round.')}
+         <form method="post" action="/walkthrough/finish" style="margin-top:8px">
+           ${biButton('შემოვლის დასრულება', 'Finish walkthrough', 'big')}
          </form>
        </div>`;
 
+  const done = scans.length
+    ? `<details class="card">
+         <summary style="cursor:pointer;font-weight:700">შემოწმებული · Scanned (${scans.length})</summary>
+         <ul class="plain cp-list" style="margin-top:8px">
+           ${scans
+             .slice()
+             .reverse()
+             .map((s) => `<li><span class="cp-name">${place(s.checkpoint_name || s.checkpoint_id, s.checkpoint_location)}</span><span class="cp-state done">${icon('check')}${clock(s.scanned_at)}</span></li>`)
+             .join('')}
+         </ul>
+       </details>`
+    : '';
+
   const finishEarly = missing.length
-    ? `<form method="post" action="/walkthrough/finish" class="no-print"
+    ? `<form method="post" action="/walkthrough/finish" class="no-print" style="margin-bottom:12px"
              onsubmit="return confirm('დარჩენილია ${missing.length} წერტილი. ნამდვილად დაასრულებთ? / ${missing.length} checkpoints remain. Really finish?')">
-         <button class="btn secondary full" type="submit">ადრე დასრულება / Finish early</button>
+         ${biButton('ადრე დასრულება', 'Finish early', 'secondary')}
        </form>`
     : '';
 
   return `
     ${scannedBanner}
-    <div class="card">
-      <h1>შემოვლა მიმდინარეობს / Walkthrough in progress</h1>
-      <div class="sub">${walkthrough.guard_name ? `დამცველი / Guard: ${esc(walkthrough.guard_name)} · ` : ''}${timeInfo}</div>
-      <div class="big">${scans.length} / ${total}</div>
-      <div class="progressbar"><div style="width:${pct}%"></div></div>
+    <div class="card ring-card">
+      ${ring(scans.length, total, 'შემოწმდა')}
+      <div style="min-width:0">
+        ${biTitle('შემოვლა მიმდინარეობს', 'Walkthrough in progress', 'h2')}
+        ${walkthrough.guard_name ? `<p style="margin:0 0 8px;display:flex;gap:6px;align-items:center">${icon('guard')}<b>${esc(walkthrough.guard_name)}</b></p>` : ''}
+        ${timeInfo}
+      </div>
     </div>
-    ${missingList}
+    ${remaining}
+    ${done}
     ${finishEarly}
-    <button class="btn secondary full no-print" data-label="Guard phone" data-done="ჩართულია / Enabled" data-denied="დაბლოკილია / Blocked" onclick="stEnablePush(this)">🔔 შეტყობინებების ჩართვა / Enable notifications</button>
+    <button class="btn ghost full small no-print" data-label="Guard phone" data-done="ჩართულია / Enabled" data-denied="დაბლოკილია / Blocked" onclick="stEnablePush(this)">${icon('bell')}შეტყობინებების ჩართვა · Enable notifications</button>
   `;
 }
 
@@ -105,36 +124,53 @@ async function linkPage(code, holder, error) {
   const linked = candidates.filter((c) => c.is_linked);
   const option = (c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`;
   const select = candidates.length
-    ? `<select name="checkpoint_id" required>
+    ? `<label for="checkpoint_id">რომელი წერტილია ეს ტეგი? · Which checkpoint is this chip?</label>
+       <select id="checkpoint_id" name="checkpoint_id" required>
          <option value="">— აირჩიეთ / Choose —</option>
          ${unlinked.length ? `<optgroup label="ჯერ არ არის დაკავშირებული / Not linked yet (${unlinked.length})">${unlinked.map(option).join('')}</optgroup>` : ''}
          ${linked.length ? `<optgroup label="უკვე დაკავშირებული — ხელახლა / Already linked — re-link">${linked.map(option).join('')}</optgroup>` : ''}
        </select>
-       <button class="btn full" type="submit">დაკავშირება / Link</button>`
+       ${biButton('დაკავშირება', 'Link')}`
     : '<p class="bad">წერტილები არ არის. დაამატეთ ადმინ პანელში. / No checkpoints exist yet — add them in the admin panel first.</p>';
+  const pct = all.length ? Math.round((100 * linkedCount) / all.length) : 0;
   return page(
     'Link tag',
     `<div class="card">
-       <h1>ტეგის დაკავშირება / Link this tag</h1>
-       <div class="sub">კოდი / Code: <code>${esc(code)}</code>${holder ? ` · ახლა / now: ${esc(holder.name)}` : ''}</div>
+       <div class="stat" style="margin-bottom:6px"><div>${biTitle('ტეგის დაკავშირება', 'Link this tag')}</div><span class="tile blue">${icon('nfc')}</span></div>
+       <p style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span class="pill">კოდი · Code <code>${esc(code)}</code></span>${holder ? `<span class="pill warn">ახლა · now: ${esc(holder.name)}</span>` : ''}</p>
        ${previous ? `<p class="muted">ადრე ეს ტეგი იყო / Before the reset this chip was: <b>${esc(previous)}</b></p>` : ''}
-       ${error ? `<p class="bad">${esc(error)}</p>` : ''}
-       <p>რომელი წერტილია ეს ტეგი? / Which checkpoint is this chip?</p>
+       ${error ? `<p><span class="pill bad">${icon('alert')}${esc(error)}</span></p>` : ''}
        <form method="post" action="/t/${esc(code)}/link">${select}</form>
-       <p class="muted" style="font-size:.85rem;margin-top:12px">დაკავშირებულია / Linked so far: ${linkedCount} / ${all.length}</p>
+     </div>
+     <div class="card">
+       <div class="stat-label">დაკავშირებულია · Linked so far</div>
+       <div class="stat-value">${linkedCount}<small> / ${all.length}</small></div>
+       <div class="progressbar" style="margin-bottom:0"><div style="width:${pct}%"></div></div>
      </div>`,
     { lang: 'ka' }
   );
 }
 
+function messageCard(tile, ic, ka, en, body = '') {
+  return `<div class="card scan-hero">
+    <span class="tile ${tile}">${icon(ic)}</span>
+    ${biTitle(ka, en)}
+    ${body}
+  </div>`;
+}
+
 function unknownTagPage(code) {
   return page(
     'Unknown tag',
-    `<div class="card"><h1>უცნობი ტეგი / Unknown tag</h1>
-     <p>ეს ტეგი სისტემაში არ არის რეგისტრირებული. / This tag is not registered in the system.</p>
-     <p class="muted" style="font-size:.85rem">კოდი / Code: <code>${esc(code)}</code><br>
-       ადმინისტრატორი: შედით <a href="/admin">/admin</a>-ში ამ ტელეფონიდან და ხელახლა შეეხეთ ტეგს, რომ დააკავშიროთ. /
-       Administrator: log in at <a href="/admin">/admin</a> on this phone, then tap the tag again to link it.</p></div>`,
+    messageCard(
+      'amber',
+      'alert',
+      'უცნობი ტეგი',
+      'Unknown tag — this tag is not registered in the system.',
+      `<p class="muted" style="font-size:.86rem">კოდი / Code: <code>${esc(code)}</code></p>
+       <p class="muted" style="font-size:.86rem">ადმინისტრატორი: შედით <a href="/admin">/admin</a>-ში ამ ტელეფონიდან და ხელახლა შეეხეთ ტეგს, რომ დააკავშიროთ. /
+         Administrator: log in at <a href="/admin">/admin</a> on this phone, then tap the tag again to link it.</p>`
+    ),
     { lang: 'ka' }
   );
 }
@@ -158,10 +194,13 @@ router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
     res.status(404).send(
       page(
         'Disabled checkpoint',
-        `<div class="card"><h1>${esc(checkpoint.name)}</h1>
-         <p>ეს ტეგი დაკავშირებულია გამორთულ წერტილთან. ჩართეთ ადმინ პანელში → Checkpoints. /
-            This chip is linked to a disabled checkpoint — enable it in Admin → Checkpoints.</p>
-         <p><a href="/t/${esc(code)}/link">ტეგის ხელახლა დაკავშირება / Re-link this chip</a></p></div>`,
+        messageCard(
+          'amber',
+          'pin',
+          esc(checkpoint.name),
+          'ეს ტეგი დაკავშირებულია გამორთულ წერტილთან. / This chip is linked to a disabled checkpoint — enable it in Admin → Checkpoints.',
+          `<a class="btn secondary full" href="/t/${esc(code)}/link">ტეგის ხელახლა დაკავშირება · Re-link this chip</a>`
+        ),
         { lang: 'ka' }
       )
     );
@@ -177,7 +216,7 @@ router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
   if (!checkpoint.linked) await markLinked(checkpoint.id);
 
   const relink = isAdmin
-    ? `<p class="no-print" style="text-align:center"><a href="/t/${esc(code)}/link">ადმინი: ტეგის ხელახლა დაკავშირება / Admin: re-link this tag</a></p>`
+    ? `<p class="no-print" style="text-align:center;margin-top:14px"><a href="/t/${esc(code)}/link">ადმინი: ტეგის ხელახლა დაკავშირება / Admin: re-link this tag</a></p>`
     : '';
 
   const active = await getActiveWalkthrough();
@@ -191,15 +230,17 @@ router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
   res.send(
     page(
       'Start walkthrough',
-      `<div class="card">
-         <h1>${esc(checkpoint.name)}</h1>
-         <div class="sub">${esc(checkpoint.location || '')}</div>
-         <p>შემოვლა არ არის დაწყებული. დაიწყეთ ახლა? / No walkthrough is running. Start one now?</p>
+      `<div class="card scan-hero">
+         <span class="tile violet">${icon('pin')}</span>
+         <h1>${place(checkpoint.name, checkpoint.location)}</h1>
+         <div class="sub">შემოვლა არ არის დაწყებული. დაიწყეთ ახლა? · No walkthrough is running. Start one now?</div>
+       </div>
+       <div class="card">
          <form method="post" action="/walkthrough/start">
            <input type="hidden" name="checkpoint_id" value="${esc(checkpoint.id)}">
-           <label for="guard_name">თქვენი სახელი / Your name</label>
+           <label for="guard_name">თქვენი სახელი · Your name</label>
            <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
-           <button class="btn full" type="submit">შემოვლის დაწყება / Start walkthrough</button>
+           ${biButton('შემოვლის დაწყება', 'Start walkthrough', 'big')}
          </form>
        </div>${relink}`,
       { lang: 'ka' }
@@ -239,9 +280,7 @@ router.post('/t/:id/link', wrap(async (req, res) => {
   }
 
   const linked = await linkTag(code, target.id);
-  const linkedNote = `<div class="card" style="text-align:center">
-       <div class="ok" style="font-weight:700">✓ ტეგი დაკავშირდა / Tag linked</div>
-     </div>`;
+  const linkedNote = `<p style="text-align:center"><span class="pill ok">${icon('check')}ტეგი დაკავშირდა · Tag linked</span></p>`;
 
   // Linking during a live round also counts as this checkpoint's scan.
   const active = await getActiveWalkthrough();
@@ -256,17 +295,17 @@ router.post('/t/:id/link', wrap(async (req, res) => {
   res.send(
     page(
       'Tag linked',
-      `<div class="card" style="text-align:center">
-         <div class="big ok">✓</div>
-         <h1>${esc(linked.name)}</h1>
-         <p>ტეგი დაკავშირდა. შეეხეთ შემდეგ ტეგს. / Tag linked. Tap the next chip.</p>
-         <p class="muted">დაკავშირებულია / Linked: ${all.length - remaining.length} / ${all.length}</p>
-       </div>
+      `${messageCard(
+         'green',
+         'check',
+         esc(linked.name),
+         `ტეგი დაკავშირდა. შეეხეთ შემდეგ ტეგს. · Tag linked. Tap the next chip. (${all.length - remaining.length} / ${all.length})`
+       )}
        ${
          remaining.length
-           ? `<div class="card"><h2>დარჩენილია დასაკავშირებლად / Still to link (${remaining.length})</h2>
-                <ul class="plain">${remaining.map((c) => `<li>${esc(c.name)}</li>`).join('')}</ul></div>`
-           : '<div class="card" style="text-align:center"><div class="ok" style="font-weight:700">ყველა ტეგი დაკავშირებულია! / All chips linked!</div></div>'
+           ? `<div class="card"><h2>დარჩენილია დასაკავშირებლად · Still to link <span class="pill info">${remaining.length}</span></h2>
+                <ul class="plain cp-list">${remaining.map((c) => `<li><span class="cp-name">${esc(c.name)}</span><span class="cp-state">${icon('nfc')}</span></li>`).join('')}</ul></div>`
+           : `<p style="text-align:center"><span class="pill ok">${icon('check')}ყველა ტეგი დაკავშირებულია! · All chips linked!</span></p>`
        }`,
       { lang: 'ka' }
     )
@@ -293,13 +332,16 @@ router.get('/walk', wrap(requireDevice), wrap(async (req, res) => {
     res.send(
       page(
         'No walkthrough',
-        `<div class="card">
-           <h1>შემოვლა არ მიმდინარეობს / No walkthrough running</h1>
-           <p>დაიწყეთ პირველი ტეგის დასკანერებით ან ღილაკით. / Start by scanning the first tag, or with the button below.</p>
+        `<div class="card scan-hero">
+           <span class="tile violet">${icon('route')}</span>
+           ${biTitle('შემოვლა არ მიმდინარეობს', 'No walkthrough running')}
+           <p class="muted" style="margin:0">დაიწყეთ პირველი ტეგის დასკანერებით ან ღილაკით. · Start by scanning the first tag, or with the button below.</p>
+         </div>
+         <div class="card">
            <form method="post" action="/walkthrough/start">
-             <label for="guard_name">თქვენი სახელი / Your name</label>
+             <label for="guard_name">თქვენი სახელი · Your name</label>
              <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
-             <button class="btn full" type="submit">შემოვლის დაწყება / Start walkthrough</button>
+             ${biButton('შემოვლის დაწყება', 'Start walkthrough', 'big')}
            </form>
          </div>`,
         { lang: 'ka' }
@@ -330,8 +372,8 @@ router.post('/walkthrough/finish', wrap(requireDevice), wrap(async (req, res) =>
 function enrollError(title, text) {
   return page(
     title,
-    `<div class="card" style="text-align:center">
-       <div class="big bad">✕</div>
+    `<div class="card scan-hero">
+       <span class="tile pink">${icon('x')}</span>
        <h1>${title}</h1>
        <p class="muted">${text}</p>
      </div>`,
@@ -343,15 +385,17 @@ router.get('/enroll/:code', wrap(async (req, res) => {
   res.send(
     page(
       'Enroll device',
-      `<div class="card">
-         <h1>ტელეფონის რეგისტრაცია / Enroll this phone</h1>
-         <p class="muted">ეს ტელეფონი დაემატება ნებადართული მოწყობილობების სიაში.
-            This phone will be added to the list of allowed devices.</p>
+      `<div class="card scan-hero">
+         <span class="tile blue">${icon('phone')}</span>
+         ${biTitle('ტელეფონის რეგისტრაცია', 'Enroll this phone')}
+         <p class="muted" style="margin:0">ეს ტელეფონი დაემატება ნებადართული მოწყობილობების სიაში. · This phone will be added to the list of allowed devices.</p>
+       </div>
+       <div class="card">
          <form method="post" action="/enroll">
            <input type="hidden" name="code" value="${esc(req.params.code)}">
-           <label for="device_name">მოწყობილობის სახელი / Device name</label>
+           <label for="device_name">მოწყობილობის სახელი · Device name</label>
            <input id="device_name" name="device_name" placeholder="მაგ. დაცვის ტელეფონი 1 / e.g. Guard phone 1">
-           <button class="btn full" type="submit">რეგისტრაცია / Enroll</button>
+           ${biButton('რეგისტრაცია', 'Enroll', 'big')}
          </form>
        </div>`,
       { lang: 'ka' }
@@ -388,14 +432,13 @@ router.post('/enroll', wrap(async (req, res) => {
   res.send(
     page(
       'Enrolled',
-      `<div class="card" style="text-align:center">
-         <div class="big ok">✓</div>
-         <h1>ტელეფონი დარეგისტრირდა / Phone enrolled</h1>
-         <p class="muted">${esc(name || '')}</p>
-         <p>ახლა ამ ტელეფონით შეგიძლიათ ტეგების სკანირება. /
-            This phone can now scan the tags.</p>
-         <a class="btn full" href="/walk">დაწყება / Open the app</a>
-       </div>`,
+      messageCard(
+        'green',
+        'check',
+        'ტელეფონი დარეგისტრირდა',
+        `Phone enrolled${name ? ` — ${esc(name)}` : ''}. ახლა ამ ტელეფონით შეგიძლიათ ტეგების სკანირება. · This phone can now scan the tags.`,
+        '<a class="btn full big" href="/walk">დაწყება · Open the app</a>'
+      ),
       { lang: 'ka' }
     )
   );
@@ -405,12 +448,13 @@ router.get('/walk/done', (req, res) => {
   res.send(
     page(
       'Done',
-      `<div class="card">
-         <div class="big ok">✓</div>
-         <h1>შემოვლა დასრულდა / Walkthrough finished</h1>
-         <p class="muted">შედეგი ჩაწერილია სისტემაში. / The result has been recorded.</p>
-         <a class="btn secondary full" href="/walk">უკან / Back</a>
-       </div>`,
+      messageCard(
+        'green',
+        'checkCircle',
+        'შემოვლა დასრულდა',
+        'Walkthrough finished. შედეგი ჩაწერილია სისტემაში. · The result has been recorded.',
+        '<a class="btn secondary full" href="/walk">უკან · Back</a>'
+      ),
       { lang: 'ka' }
     )
   );

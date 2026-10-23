@@ -6,6 +6,7 @@
   "start_url": "/admin",
   "scope": "/",
   "display": "standalone",
+  "launch_handler": { "client_mode": ["navigate-existing", "auto"] },
   "background_color": "#eef2f9",
   "theme_color": "#1f2d4a",
   "icons": [

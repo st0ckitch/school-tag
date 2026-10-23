@@ -16,6 +16,9 @@ const {
   getScans,
   getMissingCheckpoints,
   listWalkthroughs,
+  walkthroughsSince,
+  scanTimesSince,
+  mostMissedCheckpoints,
   getWalkthrough,
   unacknowledgedAlerts,
   acknowledgeAlert,
@@ -29,7 +32,8 @@ const {
 const { tick } = require('../scheduler');
 const { sendEmail, lastEmailResult, emailLog, parseRecipients } = require('../notify');
 const { resetInfo } = require('../school-checkpoints');
-const { esc, page } = require('../html');
+const { esc, page, icon, ring, place } = require('../html');
+const { areaChart, sparkline } = require('../charts');
 
 const router = express.Router();
 
@@ -37,8 +41,15 @@ const router = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // Admin pages link the separate "School Tag Admin" manifest/icon, so the
-// dashboard installs as its own app on the administrator's phone.
-const adminPage = (title, body, opts = {}) => page(title, body, { ...opts, admin: true });
+// dashboard installs as its own app on the administrator's phone. A page
+// that names its `active` section gets the app shell (sidebar on desktop,
+// tab bar on phones, top bar with the alert bell); the rest are centred.
+async function adminPage(title, body, opts = {}) {
+  const shell = opts.active
+    ? { active: opts.active, alerts: (await unacknowledgedAlerts()).length, query: opts.query || '' }
+    : null;
+  return page(title, body, { ...opts, admin: true, shell, center: !shell });
+}
 
 // --- tiny signed-cookie session ------------------------------------------
 
@@ -85,20 +96,23 @@ async function readFlash(req, key) {
   return given.length === expected.length && crypto.timingSafeEqual(given, expected) ? value : '';
 }
 
+function loginCard(error) {
+  return `<div class="card">
+    <h1>Admin login</h1>
+    <p class="sub">Enter the admin PIN to manage checkpoints, rounds and alerts.</p>
+    ${error ? `<p><span class="pill bad">${icon('alert')}${esc(error)}</span></p>` : ''}
+    <form method="post" action="/admin/login">
+      <label for="pin">PIN</label>
+      <input id="pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" autofocus>
+      <button class="btn full" type="submit">Log in</button>
+    </form>
+  </div>`;
+}
+
 async function requireAdmin(req, res, next) {
   if (await hasSession(req)) return next();
   res.status(401).send(
-    adminPage(
-      'Admin login',
-      `<div class="card" style="max-width:360px;margin:60px auto">
-         <h1>Admin login</h1>
-         <form method="post" action="/admin/login">
-           <label for="pin">PIN</label>
-           <input id="pin" name="pin" type="password" inputmode="numeric" autofocus>
-           <button class="btn full" type="submit">Log in</button>
-         </form>
-       </div>`
-    )
+    await adminPage('Admin login', loginCard())
   );
 }
 
@@ -117,18 +131,7 @@ router.post('/admin/login', wrap(async (req, res) => {
     return;
   }
   res.status(401).send(
-    adminPage(
-      'Admin login',
-      `<div class="card" style="max-width:360px;margin:60px auto">
-         <h1>Admin login</h1>
-         <p class="bad">Wrong PIN.</p>
-         <form method="post" action="/admin/login">
-           <label for="pin">PIN</label>
-           <input id="pin" name="pin" type="password" inputmode="numeric" autofocus>
-           <button class="btn full" type="submit">Log in</button>
-         </form>
-       </div>`
-    )
+    await adminPage('Admin login', loginCard('Wrong PIN.'))
   );
 }));
 
@@ -138,40 +141,6 @@ router.post('/admin/logout', (req, res) => {
 });
 
 // --- helpers ---------------------------------------------------------------
-
-const NAV_ICONS = {
-  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
-  pin: '<path d="M12 21s-7-6.1-7-11a7 7 0 0 1 14 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.6"/>',
-  print: '<path d="M6 9V3h12v6"/><path d="M6 17H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2"/><path d="M6 13h12v8H6z"/>',
-  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
-  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
-  gear: '<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/><circle cx="9" cy="7" r="2" fill="var(--card-bg)"/><circle cx="15" cy="12" r="2" fill="var(--card-bg)"/><circle cx="7" cy="17" r="2" fill="var(--card-bg)"/>',
-  out: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
-};
-
-const navIcon = (name) =>
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NAV_ICONS[name]}</svg>`;
-
-function nav(active) {
-  const items = [
-    ['/admin', 'Home', 'home'],
-    ['/admin/checkpoints', 'Points', 'pin'],
-    ['/admin/tags', 'Tags', 'print'],
-    ['/admin/devices', 'Devices', 'phone'],
-    ['/admin/history', 'History', 'clock'],
-    ['/admin/settings', 'Settings', 'gear'],
-  ];
-  return `<nav class="topnav no-print">
-    ${items
-      .map(([href, label, icon]) =>
-        href === active
-          ? `<span class="navitem active">${navIcon(icon)}<span class="navlbl">${label}</span></span>`
-          : `<a class="navitem" href="${href}">${navIcon(icon)}<span class="navlbl">${label}</span></a>`
-      )
-      .join('')}
-    <form method="post" action="/admin/logout" class="navout"><button class="navitem" type="submit" aria-label="Log out">${navIcon('out')}<span class="navlbl">Log out</span></button></form>
-  </nav>`;
-}
 
 async function baseUrl(req) {
   const configured = ((await getSetting('base_url')) || '').trim().replace(/\/+$/, '');
@@ -187,90 +156,299 @@ function fmtTime(iso) {
 }
 
 const STATUS_PILL = {
-  in_progress: '<span class="pill warn">In progress</span>',
-  completed: '<span class="pill ok">Completed</span>',
-  incomplete: '<span class="pill bad">Incomplete</span>',
-  cancelled: '<span class="pill warn">Cancelled</span>',
+  in_progress: `<span class="pill info">${icon('dot')}In progress</span>`,
+  completed: `<span class="pill ok">${icon('check')}Completed</span>`,
+  incomplete: `<span class="pill bad">${icon('alert')}Incomplete</span>`,
+  cancelled: `<span class="pill">${icon('x')}Cancelled</span>`,
 };
 
 // --- dashboard --------------------------------------------------------------
 
+const TZ = process.env.TZ || 'Asia/Tbilisi';
+const DAY_MS = 24 * 60 * 60 * 1000;
+const dayKey = (t) =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t));
+// A day key ("2026-10-23") at local noon, for labels.
+const dayLabel = (key, opts) => new Date(`${key}T12:00:00Z`).toLocaleDateString('en-GB', { timeZone: TZ, ...opts });
+
+// "23 Oct, 11:53" — compact, for tables.
+const fmtShort = (iso) =>
+  new Date(iso).toLocaleString('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+function fmtDuration(ms) {
+  if (!(ms >= 0)) return '—';
+  const min = Math.round(ms / 60000);
+  return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, '0')} min`;
+}
+
+function timeAgo(iso) {
+  const min = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  return `${Math.floor(min / 60)} h ${min % 60} min ago`;
+}
+
+// Change against the previous period: arrow + size, green when it moved the
+// good way, red when the bad way, gray when either way is fine.
+function delta(cur, prev, { goodUp = true, unit = '', digits = 0, note = 'vs previous 7 days' } = {}) {
+  if (cur === null || prev === null) return `<span class="delta-note" style="margin:0">${prev === null ? 'No earlier data yet' : ''}</span>`;
+  const d = cur - prev;
+  const shown = Math.abs(d).toFixed(digits);
+  if (Number(shown) === 0) return `<span class="delta flat">No change</span><span class="delta-note">${note}</span>`;
+  const up = d > 0;
+  const tone = goodUp === null ? 'flat' : up === goodUp ? 'good' : 'bad';
+  return `<span class="delta ${tone}">${icon(up ? 'arrowUp' : 'arrowDown')}${shown}${unit}</span><span class="delta-note">${note}</span>`;
+}
+
+const statTile = ({ label, value, deltaHtml, tile, ic }) => `
+  <div class="card stat">
+    <div style="min-width:0"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${deltaHtml}</div>
+    <span class="tile ${tile}">${icon(ic)}</span>
+  </div>`;
+
+const miniCard = ({ label, value, deltaHtml, spark }) => `
+  <div class="card mini">
+    <div style="min-width:0"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${deltaHtml}</div>
+    ${spark}
+  </div>`;
+
 router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
   await tick();
-
+  const now = Date.now();
   const active = await getActiveWalkthrough();
   const alerts = await unacknowledgedAlerts();
   const checkpoints = await listCheckpoints(true);
+  const walks = await walkthroughsSince(new Date(now - 15 * DAY_MS).toISOString());
+  const scanTimes = await scanTimesSince(new Date(now - 15 * DAY_MS).toISOString());
+  const missedTop = await mostMissedCheckpoints(new Date(now - 30 * DAY_MS).toISOString(), 5);
+  const recent = await listWalkthroughs(8);
 
-  let liveCard;
+  // The last 14 local days; the latest 7 are "this week", the 7 before "last week".
+  const days = [];
+  for (let i = 13; i >= 0; i--) days.push(dayKey(now - i * DAY_MS));
+  const group = (items, keyOf) => {
+    const map = new Map(days.map((d) => [d, []]));
+    for (const it of items) map.get(keyOf(it))?.push(it);
+    return map;
+  };
+  const walksByDay = group(walks, (w) => dayKey(w.started_at));
+  const scansByDay = group(scanTimes, (t) => dayKey(t));
+  const inDays = (keys) => keys.flatMap((d) => walksByDay.get(d));
+  const thisWeek = inDays(days.slice(7));
+  const lastWeek = inDays(days.slice(0, 7));
+
+  const finished = (ws) => ws.filter((w) => w.status === 'completed' || w.status === 'incomplete');
+  const rate = (ws) => {
+    const f = finished(ws);
+    return f.length ? Math.round((100 * f.filter((w) => w.status === 'completed').length) / f.length) : null;
+  };
+  const missed = (ws) =>
+    ws.filter((w) => w.status === 'incomplete').reduce((s, w) => s + Math.max(0, w.total_checkpoints - w.scanned_count), 0);
+  const avgMinutes = (ws) => {
+    const done = ws.filter((w) => w.status === 'completed' && w.completed_at);
+    return done.length ? done.reduce((s, w) => s + Date.parse(w.completed_at) - Date.parse(w.started_at), 0) / done.length / 60000 : null;
+  };
+  const coverage = (ws) => {
+    const f = finished(ws).filter((w) => w.total_checkpoints > 0);
+    return f.length ? (100 * f.reduce((s, w) => s + Math.min(1, w.scanned_count / w.total_checkpoints), 0)) / f.length : null;
+  };
+  const perDay = (ws) => ws.length / 7;
+
+  const today = days[13];
+  const linked = checkpoints.filter((c) => c.is_linked).length;
+  const unlinked = checkpoints.length - linked;
+  const kpis = [
+    statTile({
+      label: 'Rounds today',
+      value: walksByDay.get(today).length,
+      deltaHtml: delta(walksByDay.get(today).length, walksByDay.get(days[12]).length, { note: 'vs yesterday' }),
+      tile: 'violet',
+      ic: 'route',
+    }),
+    statTile({
+      label: 'Completion rate',
+      value: rate(thisWeek) === null ? '—' : `${rate(thisWeek)}%`,
+      deltaHtml: delta(rate(thisWeek), rate(lastWeek), { unit: ' pts' }),
+      tile: 'green',
+      ic: 'checkCircle',
+    }),
+    statTile({
+      label: 'Missed this week',
+      value: missed(thisWeek),
+      deltaHtml: delta(missed(thisWeek), lastWeek.length ? missed(lastWeek) : null, { goodUp: false }),
+      tile: 'pink',
+      ic: 'alert',
+    }),
+    statTile({
+      label: 'Chips linked',
+      value: `${linked}<small> / ${checkpoints.length}</small>`,
+      deltaHtml: unlinked
+        ? `<a class="delta bad" href="/admin/checkpoints">${unlinked} not linked yet</a>`
+        : `<span class="delta good">${icon('check')}All linked</span>`,
+      tile: 'blue',
+      ic: 'nfc',
+    }),
+  ];
+
+  const roundsNote = (ws) => {
+    if (!ws.length) return 'no rounds';
+    const bad = ws.filter((w) => w.status === 'incomplete').length;
+    return `${ws.length} round${ws.length === 1 ? '' : 's'}${bad ? `, ${bad} incomplete` : ''}`;
+  };
+  const scansThisWeek = days.slice(7).reduce((s, d) => s + scansByDay.get(d).length, 0);
+  const scansLastWeek = days.slice(0, 7).reduce((s, d) => s + scansByDay.get(d).length, 0);
+  const chart = areaChart({
+    id: 'scans-chart',
+    unit: 'scans',
+    caption: 'Checkpoint scans per day, last 14 days',
+    points: days.map((d) => ({
+      label: dayLabel(d, { weekday: 'short', day: 'numeric', month: 'short' }),
+      short: dayLabel(d, { day: 'numeric', month: 'short' }),
+      value: scansByDay.get(d).length,
+      note: roundsNote(walksByDay.get(d)),
+    })),
+  });
+
+  const avgNow = avgMinutes(thisWeek);
+  const covNow = coverage(thisWeek);
+  const minis = [
+    miniCard({
+      label: 'Average round time',
+      value: avgNow === null ? '—' : `${Math.round(avgNow)}<small> min</small>`,
+      deltaHtml: delta(avgNow, avgMinutes(lastWeek), { goodUp: null, unit: ' min' }),
+      spark: sparkline(days.map((d) => avgMinutes(walksByDay.get(d)))),
+    }),
+    miniCard({
+      label: 'Rounds per day',
+      value: perDay(thisWeek).toFixed(1).replace(/\.0$/, ''),
+      deltaHtml: delta(perDay(thisWeek), lastWeek.length ? perDay(lastWeek) : null, { digits: 1 }),
+      spark: sparkline(days.map((d) => walksByDay.get(d).length)),
+    }),
+    miniCard({
+      label: 'Checkpoints covered',
+      value: covNow === null ? '—' : `${Math.round(covNow)}%`,
+      deltaHtml: delta(covNow === null ? null : Math.round(covNow), coverage(lastWeek) === null ? null : Math.round(coverage(lastWeek)), { unit: ' pts' }),
+      spark: sparkline(days.map((d) => coverage(walksByDay.get(d)))),
+    }),
+  ];
+
+  let liveCard = '';
   if (active) {
     const scans = await getScans(active.id);
-    const scannedIds = new Set(scans.map((s) => s.checkpoint_id));
-    const total = checkpoints.length;
-    const pct = total === 0 ? 100 : Math.round((scans.length / total) * 100);
+    const missing = await getMissingCheckpoints(active.id);
+    const total = scans.length + missing.length;
     const timeInfo = active.deadline
-      ? `${Math.max(0, Math.round((new Date(active.deadline).getTime() - Date.now()) / 60000))} min left`
-      : 'no time limit';
+      ? `${Math.max(0, Math.round((new Date(active.deadline).getTime() - now) / 60000))} min left`
+      : 'No time limit';
     liveCard = `
       <div class="card">
-        <h2>Live walkthrough ${STATUS_PILL.in_progress}</h2>
-        <div class="sub">Guard: ${esc(active.guard_name || '—')} · Started ${fmtTime(active.started_at)} · ${timeInfo}</div>
-        <div class="big">${scans.length} / ${total}</div>
-        <div class="progressbar"><div style="width:${pct}%"></div></div>
-        <ul class="plain">
-          ${checkpoints
-            .map((c) => {
-              const scan = scans.find((s) => s.checkpoint_id === c.id);
-              return `<li>
-                <span>${esc(c.name)}${c.location ? ` <span class="muted">— ${esc(c.location)}</span>` : ''}</span>
-                ${
-                  scannedIds.has(c.id)
-                    ? `<span class="ok checkmark">✓ <span class="muted" style="font-size:.8rem">${fmtTime(scan.scanned_at)}</span></span>`
-                    : '<span class="muted">pending</span>'
-                }
-              </li>`;
-            })
-            .join('')}
-        </ul>
-      </div>`;
-  } else {
-    liveCard = `
-      <div class="card">
-        <h2>Live walkthrough</h2>
-        <p class="muted">No walkthrough is currently running. A walkthrough starts when a guard scans any tag, or from the <a href="/walk">guard page</a>.</p>
+        <div class="card-head"><h2>Live round ${STATUS_PILL.in_progress}</h2><a class="btn secondary small" href="/walk">Open guard view</a></div>
+        <div class="ring-card">
+          ${ring(scans.length, total, 'scanned')}
+          <div style="min-width:0">
+            <div class="stat-label">Guard</div><div style="font-weight:700;margin-bottom:8px">${esc(active.guard_name || '—')}</div>
+            <div class="muted" style="font-size:.88rem">Started ${timeAgo(active.started_at)} · ${timeInfo}</div>
+            ${scans.length ? `<div class="muted" style="font-size:.88rem">Last scan ${timeAgo(scans[scans.length - 1].scanned_at)}</div>` : ''}
+          </div>
+        </div>
+        ${
+          missing.length
+            ? `<h3 style="margin-top:18px">Still to scan (${missing.length})</h3>
+               <div class="row" style="gap:6px">${missing.map((c) => `<span class="pill" style="flex:none">${esc(c.name)}</span>`).join('')}</div>`
+            : '<p class="ok" style="margin-top:14px;font-weight:700">All checkpoints scanned — waiting for the guard to finish.</p>'
+        }
       </div>`;
   }
 
-  const alertsCard = `
+  const alertsCard = alerts.length
+    ? `<div class="card" id="alerts">
+        <div class="card-head"><h2>Alerts <span class="pill bad">${icon('alert')}${alerts.length} new</span></h2></div>
+        <ul class="plain">${alerts
+          .map(
+            (a) => `<li class="wrap" style="align-items:flex-start">
+              <span class="tile pink sm">${icon('alert')}</span>
+              <div style="flex:1;min-width:0">
+                <div style="white-space:pre-line">${esc(a.message)}</div>
+                <div class="muted" style="font-size:.8rem;margin-top:2px">${fmtTime(a.created_at)}</div>
+              </div>
+              <form method="post" action="/admin/alerts/${a.id}/ack"><button class="btn small secondary" type="submit">Acknowledge</button></form>
+            </li>`
+          )
+          .join('')}</ul>
+      </div>`
+    : '';
+
+  const recentCard = `
     <div class="card">
-      <h2>Alerts ${alerts.length ? `<span class="pill bad">${alerts.length} new</span>` : '<span class="pill ok">none</span>'}</h2>
-      <button class="btn secondary small no-print" data-label="Admin device" data-done="Notifications enabled" data-denied="Blocked in browser settings" onclick="stEnablePush(this)" style="margin-bottom:12px">🔔 Enable alert notifications on this device</button>
+      <div class="card-head"><h2>Recent rounds</h2><a href="/admin/history" class="btn ghost small">View all</a></div>
       ${
-        alerts.length
-          ? `<ul class="plain">${alerts
+        recent.length
+          ? `<div class="table-wrap"><table>
+              <thead><tr><th>Round</th><th class="hide-sm">Guard</th><th>Checkpoints</th><th class="hide-sm">Time</th><th>Status</th></tr></thead>
+              <tbody>${recent
+                .map((w) => {
+                  const pct = w.total_checkpoints ? Math.round((100 * Math.min(w.scanned_count, w.total_checkpoints)) / w.total_checkpoints) : 0;
+                  const took = w.completed_at ? fmtDuration(Date.parse(w.completed_at) - Date.parse(w.started_at)) : '—';
+                  return `<tr>
+                    <td style="white-space:nowrap"><a href="/admin/history/${encodeURIComponent(w.id)}">${fmtShort(w.started_at)}</a></td>
+                    <td class="hide-sm">${esc(w.guard_name || '—')}</td>
+                    <td><div style="display:flex;align-items:center;gap:8px"><span class="num">${w.scanned_count}/${w.total_checkpoints}</span><div class="bar-track hide-sm" style="flex:1;max-width:90px"><div style="width:${pct}%"></div></div></div></td>
+                    <td class="num hide-sm">${took}</td>
+                    <td>${STATUS_PILL[w.status] || esc(w.status)}</td>
+                  </tr>`;
+                })
+                .join('')}</tbody>
+            </table></div>`
+          : '<p class="muted">No rounds yet. A round starts when a guard scans any tag.</p>'
+      }
+    </div>`;
+
+  const topMissed = Math.max(1, ...missedTop.map((c) => c.missed));
+  const missedCard = `
+    <div class="card">
+      <div class="card-head"><h2>Most missed checkpoints</h2><span class="muted" style="font-size:.82rem">last 30 days</span></div>
+      ${
+        missedTop.length
+          ? `<ul class="plain">${missedTop
               .map(
-                (a) => `<li>
-                  <div>
-                    <div style="white-space:pre-line">${esc(a.message)}</div>
-                    <div class="muted" style="font-size:.8rem">${fmtTime(a.created_at)}</div>
-                  </div>
-                  <form method="post" action="/admin/alerts/${a.id}/ack"><button class="btn small secondary" type="submit">Acknowledge</button></form>
+                (c) => `<li>
+                  <span style="min-width:0;flex:1">${esc(c.name)}</span>
+                  <div class="bar-track" style="width:22%;flex:none"><div style="width:${Math.round((100 * c.missed) / topMissed)}%"></div></div>
+                  <span class="num" style="width:5.5em;text-align:right;font-weight:700">${c.missed} round${c.missed === 1 ? '' : 's'}</span>
                 </li>`
               )
               .join('')}</ul>`
-          : '<p class="muted">No unacknowledged alerts.</p>'
+          : `<p class="ok" style="display:flex;gap:8px;align-items:center">${icon('checkCircle')}No checkpoint was missed in the last 30 days.</p>`
       }
     </div>`;
 
   res.send(
-    adminPage(
+    await adminPage(
       'Dashboard — School Tag',
-      `${nav('/admin')}
-       <h1>School security dashboard</h1>
-       <div class="sub">${checkpoints.length} active checkpoints</div>
+      `<div class="page-head">
+         <div><h1>School security dashboard</h1>
+           <div class="sub">${new Date(now).toLocaleDateString('en-GB', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' })} · ${checkpoints.length} active checkpoints</div></div>
+         <div class="row no-print" style="flex:none">
+           <button class="btn secondary small" data-label="Admin device" data-done="Alerts enabled on this device" data-denied="Blocked in browser settings" onclick="stEnablePush(this)">${icon('bell')}Enable alerts here</button>
+           <a class="btn small" href="/walk">${icon('route')}Guard app</a>
+         </div>
+       </div>
        ${alertsCard}
-       ${liveCard}`,
-      { refreshSeconds: 10 }
+       ${liveCard}
+       <div class="grid kpis">${kpis.join('')}</div>
+       <div class="grid split">
+         <div class="card">
+           <div class="card-head">
+             <div><h2 style="margin-bottom:4px">Checkpoint scans</h2>
+               <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span class="stat-value" style="margin:0">${scansThisWeek}</span><span class="muted">this week</span>${delta(scansThisWeek, scansLastWeek)}</div></div>
+             <span class="pill">Last 14 days</span>
+           </div>
+           ${chart}
+         </div>
+         <div class="stack">${minis.join('')}</div>
+       </div>
+       <div class="grid split">${recentCard}${missedCard}</div>`,
+      { active: '/admin', refreshSeconds: active ? 10 : 60 }
     )
   );
 }));
@@ -288,69 +466,95 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
   const flashErr = await readFlash(req, 'err');
   const activeReal = checkpoints.filter((c) => c.active && !c.placeholder);
   const unlinkedCount = activeReal.filter((c) => !c.is_linked).length;
+  const query = String(req.query.q || '').trim().slice(0, 80);
+  const needle = query.toLowerCase();
+  const shown = needle
+    ? checkpoints.filter((c) => [c.name, c.location, c.id].some((v) => String(v || '').toLowerCase().includes(needle)))
+    : checkpoints;
+  const rows = shown
+    .map(
+      (c, i) => `<li class="cp-row">
+        <span class="cp-num">${i + 1}</span>
+        <div class="cp-main">
+          <div class="cp-title">${place(c.name, c.location)}</div>
+          <div class="cp-meta">
+            <code>/t/${esc(c.id)}</code>
+            ${c.active ? `<span class="pill ok">${icon('check')}Active</span>` : `<span class="pill">${icon('x')}Disabled</span>`}
+            ${c.is_linked ? `<span class="pill info" title="A chip is bound to this checkpoint">${icon('nfc')}Linked</span>` : `<span class="pill warn" title="No chip bound yet — tap the chip with an admin-logged-in phone">${icon('alert')}Not linked</span>`}
+          </div>
+          <details class="cp-edit">
+            <summary>Edit</summary>
+            <form method="post" action="/admin/checkpoints/${esc(c.id)}/update" class="row" style="align-items:flex-end;margin-top:10px">
+              <div><label>Name<input name="name" value="${esc(c.name)}" style="margin:6px 0 0"></label></div>
+              <div><label>Location<input name="location" value="${esc(c.location)}" placeholder="Location" style="margin:6px 0 0"></label></div>
+              <button class="btn small" type="submit" style="flex:none">Save</button>
+            </form>
+          </details>
+        </div>
+        <div class="cp-actions">
+          <form method="post" action="/admin/checkpoints/${esc(c.id)}/toggle"><button class="btn small secondary" type="submit">${c.active ? 'Disable' : 'Enable'}</button></form>
+          <form method="post" action="/admin/checkpoints/${esc(c.id)}/delete" data-confirm="${esc(`Delete checkpoint ${c.name}? Its scan history stays, but the tag stops working.`)}" onsubmit="return confirm(this.dataset.confirm)"><button class="btn small ghost" type="submit" aria-label="Delete ${esc(c.name)}" style="color:var(--bad)">Delete</button></form>
+        </div>
+      </li>`
+    )
+    .join('');
   res.send(
-    adminPage(
+    await adminPage(
       'Checkpoints — School Tag',
-      `${nav('/admin/checkpoints')}
-       <h1>Checkpoints</h1>
-       <div class="sub">${activeReal.length - unlinkedCount} of ${activeReal.length} linked to a chip${
-         unlinkedCount
-           ? ` · <b>${unlinkedCount} not linked yet</b>: log in here on your phone, then tap each chip — the phone asks which checkpoint it is.`
-           : ''
-       }</div>
-       <div class="card">
-         <h2>Add checkpoint</h2>
-         ${flashMsg ? `<p class="ok">✓ ${esc(flashMsg)}</p>` : ''}
-         ${flashErr ? `<p class="bad">✕ ${esc(flashErr)}</p>` : ''}
-         <form method="post" action="/admin/checkpoints">
-           <div class="row">
-             <div><label for="name">Name</label><input id="name" name="name" required placeholder="e.g. Main entrance"></div>
-             <div><label for="location">Location (optional)</label><input id="location" name="location" placeholder="e.g. Ground floor, west wing"></div>
-           </div>
-           <label for="tag_code">Tag code (optional — ONLY when restoring an already-written chip; the 8-character code from its URL, e.g. <code>63f91d85</code>)</label>
-           <input id="tag_code" name="tag_code" pattern="[0-9a-fA-F]{6,16}" placeholder="leave empty for a new tag">
-           <button class="btn" type="submit">Add</button>
-         </form>
+      `<div class="page-head">
+         <div><h1>Checkpoints</h1>
+           <div class="sub">${activeReal.length - unlinkedCount} of ${activeReal.length} linked to a chip${
+             unlinkedCount
+               ? ` · <b>${unlinkedCount} not linked yet</b>: log in here on your phone, then tap each chip — the phone asks which checkpoint it is.`
+               : ''
+           }</div></div>
+         <div class="row no-print" style="flex:none">
+           <a class="btn secondary small" href="/admin/tags">${icon('tag')}Tag sheet</a>
+           <a class="btn small" href="#add">${icon('plus')}Add checkpoint</a>
+         </div>
        </div>
+       ${flashMsg ? `<div class="card" style="padding:14px 18px"><span class="ok" style="font-weight:700">✓ ${esc(flashMsg)}</span></div>` : ''}
+       ${flashErr ? `<div class="card" style="padding:14px 18px"><span class="bad" style="font-weight:700">✕ ${esc(flashErr)}</span></div>` : ''}
        <div class="card">
-         <h2>Bulk restore</h2>
-         <p class="muted">One item per line (numbered lists like <code>1. Name, 2. Name</code> work too):</p>
-         <ul class="muted" style="font-size:.9rem;margin-top:0">
-           <li><code>Name</code> — creates a checkpoint; tap its chip later with an admin-logged-in phone to link it.</li>
-           <li><code>tagcode, Name, Location</code> — binds that chip to the checkpoint with that name (or creates it).</li>
-           <li>Anything containing tag links (Railway logs, browser history, URL lists) — every <code>/t/code</code> found is added as "Tag code". In such a paste only lines with codes are used; other text is ignored.</li>
-         </ul>
-         <form method="post" action="/admin/checkpoints/bulk">
-           <textarea name="bulk" rows="10" style="width:100%;padding:12px 14px;border:1px solid var(--input-border);border-radius:12px;background:var(--input-bg);color:var(--text);font-family:inherit;font-size:0.95rem" placeholder="63f91d85, Main entrance, Ground floor&#10;ece2c3ac, Gym&#10;dfbedd8d, Library, 1st floor"></textarea>
-           <button class="btn" type="submit" style="margin-top:10px">Restore all</button>
-         </form>
+         <div class="card-head">
+           <h2>${needle ? `Matching “${esc(query)}” <span class="pill">${shown.length} of ${checkpoints.length}</span>` : `All checkpoints <span class="pill">${checkpoints.length}</span>`}</h2>
+           <form method="get" action="/admin/checkpoints" class="m-only" role="search" style="flex:1;max-width:320px">
+             <input type="search" name="q" value="${esc(query)}" placeholder="Search checkpoints…" aria-label="Search checkpoints" style="margin:0">
+           </form>
+           ${needle ? '<a class="btn ghost small" href="/admin/checkpoints">Clear search</a>' : ''}
+         </div>
+         ${
+           shown.length
+             ? `<ul class="plain cp-table">${rows}</ul>`
+             : `<p class="muted">${checkpoints.length ? 'No checkpoint matches that search.' : 'No checkpoints yet — add 30–35 below, one per tag location.'}</p>`
+         }
        </div>
-       <div class="card">
-         <table>
-           <tr><th>Name</th><th>Location</th><th>Tag URL</th><th>Status</th><th></th></tr>
-           ${checkpoints
-             .map(
-               (c) => `<tr>
-                 <td colspan="2">
-                   <form method="post" action="/admin/checkpoints/${esc(c.id)}/update" class="row" style="align-items:center">
-                     <input name="name" value="${esc(c.name)}" style="margin-bottom:0">
-                     <input name="location" value="${esc(c.location)}" placeholder="Location" style="margin-bottom:0">
-                     <button class="btn small secondary" type="submit" style="flex:none">Save</button>
-                   </form>
-                 </td>
-                 <td><code>/t/${esc(c.id)}</code></td>
-                 <td>${c.active ? '<span class="pill ok">active</span>' : '<span class="pill warn">disabled</span>'}
-                   ${c.is_linked ? '<span class="pill ok" title="A chip is bound to this checkpoint">🔗 linked</span>' : '<span class="pill warn" title="No chip bound yet — tap the chip with an admin-logged-in phone">not linked</span>'}</td>
-                 <td style="white-space:nowrap">
-                   <form method="post" action="/admin/checkpoints/${esc(c.id)}/toggle" style="display:inline"><button class="btn small secondary" type="submit">${c.active ? 'Disable' : 'Enable'}</button></form>
-                   <form method="post" action="/admin/checkpoints/${esc(c.id)}/delete" style="display:inline" data-confirm="${esc(`Delete checkpoint ${c.name}? Its scan history stays, but the tag stops working.`)}" onsubmit="return confirm(this.dataset.confirm)"><button class="btn small danger" type="submit">Delete</button></form>
-                 </td>
-               </tr>`
-             )
-             .join('')}
-         </table>
-         ${checkpoints.length === 0 ? '<p class="muted">No checkpoints yet — add 30–35 above, one per tag location.</p>' : ''}
-       </div>`
+       <div class="grid halves">
+         <div class="card" id="add">
+           <h2>Add checkpoint</h2>
+           <form method="post" action="/admin/checkpoints">
+             <label for="name">Name</label><input id="name" name="name" required placeholder="e.g. Main entrance">
+             <label for="location">Location (optional)</label><input id="location" name="location" placeholder="e.g. Ground floor, west wing">
+             <label for="tag_code">Tag code — only when restoring an already-written chip (the 8-character code from its URL, e.g. <code>63f91d85</code>)</label>
+             <input id="tag_code" name="tag_code" pattern="[0-9a-fA-F]{6,16}" placeholder="leave empty for a new tag">
+             <button class="btn" type="submit">${icon('plus')}Add</button>
+           </form>
+         </div>
+         <div class="card">
+           <h2>Bulk restore</h2>
+           <p class="muted">One item per line (numbered lists like <code>1. Name, 2. Name</code> work too):</p>
+           <ul class="muted" style="font-size:.88rem;margin-top:0;padding-left:18px">
+             <li><code>Name</code> — creates a checkpoint; tap its chip later with an admin-logged-in phone to link it.</li>
+             <li><code>tagcode, Name, Location</code> — binds that chip to the checkpoint with that name (or creates it).</li>
+             <li>Anything containing tag links (Railway logs, browser history, URL lists) — every <code>/t/code</code> found is added as "Tag code". In such a paste only lines with codes are used; other text is ignored.</li>
+           </ul>
+           <form method="post" action="/admin/checkpoints/bulk">
+             <textarea name="bulk" rows="7" placeholder="63f91d85, Main entrance, Ground floor&#10;ece2c3ac, Gym&#10;dfbedd8d, Library, 1st floor"></textarea>
+             <button class="btn secondary" type="submit">Restore all</button>
+           </form>
+         </div>
+       </div>`,
+      { active: '/admin/checkpoints', query }
     )
   );
 }));
@@ -646,32 +850,33 @@ router.get('/admin/tags', wrap(requireAdmin), wrap(async (req, res) => {
   const checkpoints = await listCheckpoints(true);
   const base = await baseUrl(req);
   const cards = await Promise.all(
-    checkpoints.map(async (c) => {
+    checkpoints.map(async (c, i) => {
       const url = `${base}/t/${c.id}`;
       const qr = await QRCode.toDataURL(url, { width: 220, margin: 1 });
-      return `<div class="card" style="text-align:center">
-        <h2 style="margin-bottom:2px">${esc(c.name)}</h2>
-        <div class="muted">${esc(c.location || '')}</div>
-        ${c.is_linked ? '' : '<p class="warn no-print" style="font-size:.85rem">Not linked yet. If you link an already-written chip to this checkpoint (tap it as admin), this code changes. Write or print it only for a brand-new chip.</p>'}
-        <img src="${qr}" alt="QR for ${esc(c.name)}" style="margin:8px 0">
-        <div><code style="font-size:.8rem">${esc(url)}</code></div>
+      return `<div class="card tag-card">
+        <div class="tag-head"><span class="cp-num">${i + 1}</span><h2>${place(c.name, c.location)}</h2></div>
+        ${c.is_linked ? '' : '<p class="warn no-print" style="font-size:.84rem">Not linked yet. If you link an already-written chip to this checkpoint (tap it as admin), this code changes. Write or print it only for a brand-new chip.</p>'}
+        <img src="${qr}" alt="QR for ${esc(c.name)}" width="176" height="176">
+        <code>${esc(url)}</code>
       </div>`;
     })
   );
   res.send(
-    adminPage(
+    await adminPage(
       'Tag sheet — School Tag',
-      `${nav('/admin/tags')}
-       <div class="no-print card">
-         <h1>Tag sheet</h1>
-         <p>Write each URL below to its NFC tag as an <b>NDEF URL record</b> (use a free app like
+      `<div class="page-head no-print">
+         <div><h1>Tag sheet</h1><div class="sub">${checkpoints.length} active checkpoints · one URL and QR code per chip</div></div>
+         <button class="btn" onclick="window.print()">${icon('tag')}Print</button>
+       </div>
+       <div class="card no-print">
+         <p style="margin:0">Write each URL below to its NFC tag as an <b>NDEF URL record</b> (use a free app like
             <b>NFC Tools</b> on Android or iPhone: Write → Add a record → URL → paste → Write, then
             optionally lock the tag so it can't be rewritten). The QR code is a fallback — print this
             page and stick the QR next to the tag for phones without NFC.</p>
-         <button class="btn" onclick="window.print()">Print</button>
        </div>
-       ${cards.join('')}
-       ${checkpoints.length === 0 ? '<p class="muted">No active checkpoints. Add them on the Checkpoints page first.</p>' : ''}`
+       <div class="tag-grid">${cards.join('')}</div>
+       ${checkpoints.length === 0 ? '<p class="muted">No active checkpoints. Add them on the Checkpoints page first.</p>' : ''}`,
+      { active: '/admin/tags' }
     )
   );
 }));
@@ -692,10 +897,9 @@ async function devicesPage(req, enrollUrl) {
        </div>`
     : '';
 
-  return adminPage(
+  return await adminPage(
     'Devices — School Tag',
-    `${nav('/admin/devices')}
-     <h1>Allowed devices</h1>
+    `<h1>Allowed devices</h1>
      <div class="sub">${devices.length} of ${esc(max)} enrolled · enforcement ${enforcing ? '<span class="pill ok">ON</span>' : '<span class="pill warn">OFF</span>'}</div>
      ${enrollCard}
      <div class="card">
@@ -726,7 +930,8 @@ async function devicesPage(req, enrollUrl) {
          <input id="max_devices" name="max_devices" type="number" min="1" max="20" value="${esc(max)}">
          <button class="btn" type="submit">Save</button>
        </div>
-     </form>`
+     </form>`,
+    { active: '/admin/devices' }
   );
 }
 
@@ -757,10 +962,9 @@ router.post('/admin/devices/settings', wrap(requireAdmin), wrap(async (req, res)
 router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
   const walks = await listWalkthroughs(50);
   res.send(
-    adminPage(
+    await adminPage(
       'History — School Tag',
-      `${nav('/admin/history')}
-       <h1>Walkthrough history</h1>
+      `<h1>Walkthrough history</h1>
        <div class="card">
          <table>
            <tr><th>Started</th><th>Guard</th><th>Scanned</th><th>Status</th><th></th></tr>
@@ -777,7 +981,8 @@ router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
              .join('')}
          </table>
          ${walks.length === 0 ? '<p class="muted">No walkthroughs yet.</p>' : ''}
-       </div>`
+       </div>`,
+      { active: '/admin/history' }
     )
   );
 }));
@@ -798,10 +1003,9 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
   const scanName = (s) => (preReset && reset.names.get(s.checkpoint_id)) || s.checkpoint_name || s.checkpoint_id;
   const preResetAlerts = preReset ? await alertsForWalkthrough(w.id) : [];
   res.send(
-    adminPage(
+    await adminPage(
       'Walkthrough — School Tag',
-      `${nav('/admin/history')}
-       <h1>Walkthrough ${fmtTime(w.started_at)}</h1>
+      `<h1>Walkthrough ${fmtTime(w.started_at)}</h1>
        <div class="sub">Guard: ${esc(w.guard_name || '—')} · ${STATUS_PILL[w.status] || esc(w.status)} · Finished: ${fmtTime(w.completed_at)}</div>
        <div class="card">
          <h2>Scanned (${scans.length})</h2>
@@ -829,7 +1033,8 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
                 <ul class="plain">${missed.map((c) => `<li>${esc(c.name)}${c.location ? ` <span class="muted">— ${esc(c.location)}</span>` : ''}</li>`).join('')}</ul>
               </div>`
            : ''
-       }`
+       }`,
+      { active: '/admin/history' }
     )
   );
 }));
@@ -882,10 +1087,9 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
     /@(gmail\.com|googlemail\.com|yahoo\.[a-z.]+|ymail\.com|outlook\.com|hotmail\.[a-z.]+|live\.com|icloud\.com|me\.com|aol\.com|mail\.(com|ru))$/i.test(a.trim())
   );
   res.send(
-    adminPage(
+    await adminPage(
       'Settings — School Tag',
-      `${nav('/admin/settings')}
-       <h1>Settings</h1>
+      `<h1>Settings</h1>
        <form method="post" action="/admin/settings">
          <div class="card">
            <h2>Walkthrough</h2>
@@ -951,7 +1155,8 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <button class="btn" type="submit">Save</button>
            <button class="btn secondary" type="submit" formaction="/admin/settings/test-email">Save &amp; send test email</button>
          </div>
-       </form>`
+       </form>`,
+      { active: '/admin/settings' }
     )
   );
 }));

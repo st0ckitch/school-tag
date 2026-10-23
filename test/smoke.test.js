@@ -1331,3 +1331,14 @@ test('an SMTP attempt that never finishes gives up at the deadline instead of ho
     silent.close();
   }
 });
+
+test('guard pages keep chip taps in one tab', async () => {
+  const html = await (await fetch(`${base}/walk`)).text();
+  assert.match(html, /id="st-nfc"[^>]* hidden/, 'NFC button starts hidden and only shows where Web NFC exists');
+  assert.match(html, /new NDEFReader\(\)/);
+  assert.match(html, /new BroadcastChannel\('school-tag-guard'\)/);
+  for (const m of ['manifest', 'manifest-admin']) {
+    const manifest = await (await fetch(`${base}/${m}.webmanifest`)).json();
+    assert.deepEqual(manifest.launch_handler, { client_mode: ['navigate-existing', 'auto'] }, m);
+  }
+});

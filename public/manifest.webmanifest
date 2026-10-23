@@ -5,6 +5,7 @@
   "start_url": "/walk",
   "scope": "/",
   "display": "standalone",
+  "launch_handler": { "client_mode": ["navigate-existing", "auto"] },
   "background_color": "#eef2f9",
   "theme_color": "#2563eb",
   "icons": [
