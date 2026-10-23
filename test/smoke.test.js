@@ -1373,3 +1373,83 @@ test('the round email is Georgian HTML listing scanned and missed checkpoints', 
   const expired = roundEmail({ walkthrough, scans, missing, reason: 'time expired', endedAt: '2026-10-23T08:40:00.000Z' });
   assert.match(expired.text, /^შემოვლის დრო ამოიწურა\./);
 });
+
+test('with a guard password, scanning needs it once per round on each phone', async () => {
+  const admin = await adminCookie();
+  const form = (body, cookie) => ({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(cookie ? { Cookie: cookie } : {}) },
+    body: new URLSearchParams(body).toString(),
+    redirect: 'manual',
+  });
+  const setCookieOf = (res) => (res.headers.get('set-cookie') || '').split(';')[0];
+  // Clean slate: no round running, two checkpoints.
+  const leftover = await db.getActiveWalkthrough();
+  if (leftover) await db.finishWalkthrough(leftover.id, 'cancelled');
+  const a = await db.addCheckpoint('Lock A', '');
+  const b = await db.addCheckpoint('Lock B', '');
+  await fetch(`${base}/admin/settings`, form({ guard_password: '123bga123' }, admin));
+  try {
+    const stored = await db.getSetting('guard_password_hash');
+    assert.match(stored, /^scrypt\$/);
+    assert.doesNotMatch(stored, /123bga123/, 'only a hash is stored');
+
+    let html = await (await fetch(`${base}/walk`)).text();
+    assert.match(html, /name="password" type="password"/, 'the start form asks for it');
+
+    // Wrong or missing password: no round starts.
+    let res = await fetch(`${base}/walkthrough/start`, form({ guard_name: 'Locked', password: 'nope' }));
+    assert.equal(res.status, 401);
+    assert.match(await res.text(), /Wrong password/);
+    assert.equal(await db.getActiveWalkthrough(), null);
+    res = await fetch(`${base}/walkthrough/start`, form({ guard_name: 'Locked' }));
+    assert.equal(res.status, 401);
+
+    // Right password: the round starts and this phone gets the round cookie.
+    res = await fetch(`${base}/walkthrough/start`, form({ guard_name: 'Locked', password: '123bga123', checkpoint_id: a.id }));
+    assert.equal(res.status, 302);
+    const phone1 = setCookieOf(res);
+    assert.match(phone1, /^st_round=/);
+    const w = await db.getActiveWalkthrough();
+    assert.deepEqual((await db.getScans(w.id)).map((s) => s.checkpoint_id), [a.id]);
+
+    // That phone's taps record without asking again.
+    res = await fetch(`${base}/t/${b.id}`, { headers: { Cookie: phone1 } });
+    assert.equal(res.status, 200);
+    assert.equal((await db.getScans(w.id)).length, 2);
+
+    // Another phone is asked once, and nothing is recorded before that.
+    await db.rawExecute('DELETE FROM scans WHERE walkthrough_id = ? AND checkpoint_id = ?', [w.id, b.id]);
+    res = await fetch(`${base}/t/${b.id}`);
+    assert.equal(res.status, 401);
+    assert.match(await res.text(), /action="\/t\/[^"]+\/unlock"/);
+    assert.equal((await db.getScans(w.id)).length, 1);
+    res = await fetch(`${base}/t/${b.id}/unlock`, form({ password: 'wrong' }));
+    assert.equal(res.status, 401);
+    res = await fetch(`${base}/t/${b.id}/unlock`, form({ password: '123bga123' }));
+    assert.equal(res.status, 302);
+    const phone2 = setCookieOf(res);
+    res = await fetch(`${base}/t/${b.id}`, { headers: { Cookie: phone2 } });
+    assert.equal(res.status, 200);
+    assert.equal((await db.getScans(w.id)).length, 2);
+
+    // A cookie from another round doesn't unlock this one; finishing needs it too.
+    assert.equal((await fetch(`${base}/walk`, { headers: { Cookie: 'st_round=other.0123456789abcdef0123456789abcdef' } })).status, 401);
+    res = await fetch(`${base}/walkthrough/finish`, form({}));
+    assert.equal(res.status, 401);
+    assert.equal((await db.getWalkthrough(w.id)).status, 'in_progress');
+
+    // An admin session always passes.
+    assert.equal((await fetch(`${base}/walk`, { headers: { Cookie: admin } })).status, 200);
+    res = await fetch(`${base}/walkthrough/finish`, form({}, phone1));
+    assert.equal(res.headers.get('location'), '/walk/done');
+  } finally {
+    await fetch(`${base}/admin/settings`, form({ guard_password_clear: '1' }, admin));
+    const still = await db.getActiveWalkthrough();
+    if (still) await db.finishWalkthrough(still.id, 'cancelled');
+    await db.deleteCheckpoint(a.id);
+    await db.deleteCheckpoint(b.id);
+  }
+  assert.equal(await db.getSetting('guard_password_hash'), '');
+  assert.equal((await fetch(`${base}/walk`)).status, 200, 'no password: open again');
+});

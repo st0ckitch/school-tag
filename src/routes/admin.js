@@ -36,6 +36,7 @@ const { resetInfo } = require('../school-checkpoints');
 const { esc, page, icon, ring, place, ka } = require('../html');
 const { areaChart, sparkline } = require('../charts');
 const { testEmail } = require('../email-template');
+const { passwordSet, setPassword } = require('../guard-lock');
 
 const router = express.Router();
 
@@ -1087,6 +1088,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const brevoFromEmail = (await getSetting('brevo_from_email')) || '';
   const emailTest = await readFlash(req, 'email_test');
   const settingsErr = await readFlash(req, 'settings_err');
+  const guardPasswordOn = await passwordSet();
   const lastEmail = await lastEmailResult();
   const log = await emailLog();
   const logView = log.length
@@ -1120,7 +1122,10 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
          <div class="card">
            <h2>Walkthrough</h2>
            <label for="walk_duration_minutes">Time limit for one walkthrough (minutes). If the guard has not scanned every tag within this time, an alert is sent. <b>Set 0 for no time limit</b> — the walkthrough then stays open until the guard presses Finish.</label>
-           <input id="walk_duration_minutes" name="walk_duration_minutes" type="number" min="0" max="720" value="${esc(walkDurationMinutes)}">
+           <input id="walk_duration_minutes" name="walk_duration_minutes" type="number" min="0" max="720" value="${esc(walkDurationMinutes)}" class="input-sm">
+           <label for="guard_password">Guard password — asked when a guard starts a round (once per round on each phone). ${guardPasswordOn ? '<span class="pill ok">set</span>' : '<span class="pill warn">not set — anyone can scan</span>'}</label>
+           <input id="guard_password" name="guard_password" type="password" autocomplete="new-password" placeholder="${guardPasswordOn ? 'type a new password to change it' : 'type a password to turn it on'}">
+           ${guardPasswordOn ? '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="guard_password_clear" value="1"> Remove the password (anyone can scan again)</label>' : ''}
          </div>
          <div class="card">
            <h2>Alert delivery</h2>
@@ -1197,6 +1202,8 @@ const SETTINGS_KEYS = [
 // which is kept as it was; returns why, or '' when everything was saved.
 async function saveSettings(req) {
   let error = '';
+  if (req.body.guard_password_clear === '1') await setPassword('');
+  else if (String(req.body.guard_password || '').trim()) await setPassword(String(req.body.guard_password).trim());
   for (const key of SETTINGS_KEYS) {
     if (req.body[key] === undefined) continue;
     let value = String(req.body[key]).trim();

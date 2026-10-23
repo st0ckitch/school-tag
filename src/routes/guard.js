@@ -25,6 +25,7 @@ const { tick, closeIncomplete, completeWalkthrough } = require('../scheduler');
 const { requireDevice, deviceCookieHeader } = require('../device');
 const { hasSession } = require('./admin');
 const { previousNameForCode } = require('../school-checkpoints');
+const { passwordSet, checkPassword, unlockCookieHeader, unlocked } = require('../guard-lock');
 const { esc, page, icon, ring, place } = require('../html');
 
 const router = express.Router();
@@ -40,10 +41,75 @@ const TZ = process.env.TZ || 'Asia/Tbilisi';
 const clock = (iso) => new Date(iso).toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
 
 // A big button labelled in Georgian with the English underneath.
-const biButton = (ka, en, cls = '') => `<button class="btn full two ${cls}" type="submit"><span>${ka}</span><span class="en">${en}</span></button>`;
+const biButton = (ka, en, cls = '') => `<button class="btn full two ${cls}" type="submit"><span>${ka}</span><span class="en" lang="en">${en}</span></button>`;
 
 // A Georgian heading with its English line.
-const biTitle = (ka, en, tag = 'h1') => `<${tag}>${ka}</${tag}><div class="sub">${en}</div>`;
+const biTitle = (ka, en, tag = 'h1') => `<${tag}>${ka}</${tag}><div class="sub" lang="en">${en}</div>`;
+
+const WRONG_PASSWORD = 'არასწორი პაროლი · Wrong password';
+
+// The scan password field, shown only when Settings has a guard password.
+function passwordField(error) {
+  return `<label for="guard_password">პაროლი · Password</label>
+    <input id="guard_password" name="password" type="password" autocomplete="current-password" required>
+    ${error ? `<p><span class="pill bad">${icon('alert')}${esc(error)}</span></p>` : ''}`;
+}
+
+// The form that starts a round, from /walk or from a tapped chip.
+function startForm(checkpointId, needPassword, error) {
+  return `<form method="post" action="/walkthrough/start">
+    ${checkpointId ? `<input type="hidden" name="checkpoint_id" value="${esc(checkpointId)}">` : ''}
+    <label for="guard_name">თქვენი სახელი · Your name</label>
+    <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
+    ${needPassword ? passwordField(error) : ''}
+    ${biButton('შემოვლის დაწყება', 'Start walkthrough', 'big')}
+  </form>`;
+}
+
+function noRoundPage(needPassword, error) {
+  return page(
+    'No walkthrough',
+    `<div class="card scan-hero">
+       <span class="tile violet">${icon('route')}</span>
+       ${biTitle('შემოვლა არ მიმდინარეობს', 'No walkthrough running')}
+       <p class="muted" style="margin:0">დაიწყეთ პირველი ტეგის დასკანერებით ან ღილაკით. · Start by scanning the first tag, or with the button below.</p>
+     </div>
+     <div class="card">${startForm(null, needPassword, error)}</div>`,
+    { lang: 'ka' }
+  );
+}
+
+function startFromTagPage(checkpoint, needPassword, error, relink = '') {
+  return page(
+    'Start walkthrough',
+    `<div class="card scan-hero">
+       <span class="tile violet">${icon('pin')}</span>
+       <h1>${place(checkpoint.name, checkpoint.location)}</h1>
+       <div class="sub">შემოვლა არ არის დაწყებული. დაიწყეთ ახლა? · No walkthrough is running. Start one now?</div>
+     </div>
+     <div class="card">${startForm(checkpoint.id, needPassword, error)}</div>${relink}`,
+    { lang: 'ka' }
+  );
+}
+
+// A phone joining a round that is already running types the password once.
+function unlockPage(action, checkpoint, error) {
+  return page(
+    'Password',
+    `<div class="card scan-hero">
+       <span class="tile violet">${icon('shield')}</span>
+       ${biTitle('შეიყვანეთ პაროლი', 'Scanning is password-protected — enter it once for this round.')}
+       ${checkpoint ? `<p style="margin:0"><b>${place(checkpoint.name, checkpoint.location)}</b></p>` : ''}
+     </div>
+     <div class="card">
+       <form method="post" action="${esc(action)}">
+         ${passwordField(error)}
+         ${biButton('გაგრძელება', 'Continue', 'big')}
+       </form>
+     </div>`,
+    { lang: 'ka' }
+  );
+}
 
 async function progressView(walkthrough, justScanned) {
   const scans = await getScans(walkthrough.id);
@@ -221,31 +287,42 @@ router.get('/t/:id', wrap(requireDevice), wrap(async (req, res) => {
 
   const active = await getActiveWalkthrough();
   if (active) {
+    if (!(await unlocked(req, active.id))) {
+      res.status(401).send(unlockPage(`/t/${encodeURIComponent(code)}/unlock`, checkpoint));
+      return;
+    }
     await recordScan(active.id, checkpoint.id);
     res.send(page(`✓ ${checkpoint.name}`, (await progressView(active, checkpoint)) + relink, { lang: 'ka' }));
     return;
   }
 
   // No walkthrough running — offer to start one from this tag.
-  res.send(
-    page(
-      'Start walkthrough',
-      `<div class="card scan-hero">
-         <span class="tile violet">${icon('pin')}</span>
-         <h1>${place(checkpoint.name, checkpoint.location)}</h1>
-         <div class="sub">შემოვლა არ არის დაწყებული. დაიწყეთ ახლა? · No walkthrough is running. Start one now?</div>
-       </div>
-       <div class="card">
-         <form method="post" action="/walkthrough/start">
-           <input type="hidden" name="checkpoint_id" value="${esc(checkpoint.id)}">
-           <label for="guard_name">თქვენი სახელი · Your name</label>
-           <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
-           ${biButton('შემოვლის დაწყება', 'Start walkthrough', 'big')}
-         </form>
-       </div>${relink}`,
-      { lang: 'ka' }
-    )
-  );
+  res.send(startFromTagPage(checkpoint, await passwordSet(), '', relink));
+}));
+
+router.post('/t/:id/unlock', wrap(requireDevice), wrap(async (req, res) => {
+  const code = String(req.params.id).toLowerCase();
+  const active = await getActiveWalkthrough();
+  if (active) {
+    if (!(await checkPassword(req.body.password))) {
+      res.status(401).send(unlockPage(`/t/${encodeURIComponent(code)}/unlock`, await getCheckpoint(code), WRONG_PASSWORD));
+      return;
+    }
+    res.setHeader('Set-Cookie', await unlockCookieHeader(active.id));
+  }
+  res.redirect(`/t/${encodeURIComponent(code)}`);
+}));
+
+router.post('/walk/unlock', wrap(requireDevice), wrap(async (req, res) => {
+  const active = await getActiveWalkthrough();
+  if (active) {
+    if (!(await checkPassword(req.body.password))) {
+      res.status(401).send(unlockPage('/walk/unlock', null, WRONG_PASSWORD));
+      return;
+    }
+    res.setHeader('Set-Cookie', await unlockCookieHeader(active.id));
+  }
+  res.redirect('/walk');
 }));
 
 router.get('/t/:id/link', wrap(async (req, res) => {
@@ -313,8 +390,14 @@ router.post('/t/:id/link', wrap(async (req, res) => {
 }));
 
 router.post('/walkthrough/start', wrap(requireDevice), wrap(async (req, res) => {
-  const walkthrough = await startWalkthrough((req.body.guard_name || '').trim().slice(0, 80));
   const checkpointId = req.body.checkpoint_id;
+  if ((await passwordSet()) && !(await hasSession(req)) && !(await checkPassword(req.body.password))) {
+    const checkpoint = checkpointId ? await getCheckpoint(checkpointId) : null;
+    res.status(401).send(checkpoint ? startFromTagPage(checkpoint, true, WRONG_PASSWORD) : noRoundPage(true, WRONG_PASSWORD));
+    return;
+  }
+  const walkthrough = await startWalkthrough((req.body.guard_name || '').trim().slice(0, 80));
+  if (await passwordSet()) res.setHeader('Set-Cookie', await unlockCookieHeader(walkthrough.id));
   if (checkpointId && (await getCheckpoint(checkpointId))) {
     await recordScan(walkthrough.id, checkpointId);
     res.redirect(`/t/${encodeURIComponent(checkpointId)}`);
@@ -329,24 +412,11 @@ router.get('/walk', wrap(requireDevice), wrap(async (req, res) => {
 
   const active = await getActiveWalkthrough();
   if (!active) {
-    res.send(
-      page(
-        'No walkthrough',
-        `<div class="card scan-hero">
-           <span class="tile violet">${icon('route')}</span>
-           ${biTitle('შემოვლა არ მიმდინარეობს', 'No walkthrough running')}
-           <p class="muted" style="margin:0">დაიწყეთ პირველი ტეგის დასკანერებით ან ღილაკით. · Start by scanning the first tag, or with the button below.</p>
-         </div>
-         <div class="card">
-           <form method="post" action="/walkthrough/start">
-             <label for="guard_name">თქვენი სახელი · Your name</label>
-             <input id="guard_name" name="guard_name" placeholder="მაგ. გიორგი / e.g. Giorgi" autocomplete="name">
-             ${biButton('შემოვლის დაწყება', 'Start walkthrough', 'big')}
-           </form>
-         </div>`,
-        { lang: 'ka' }
-      )
-    );
+    res.send(noRoundPage(await passwordSet()));
+    return;
+  }
+  if (!(await unlocked(req, active.id))) {
+    res.status(401).send(unlockPage('/walk/unlock'));
     return;
   }
   res.send(page('Walkthrough', await progressView(active), { lang: 'ka', refreshSeconds: 15 }));
@@ -356,6 +426,10 @@ router.post('/walkthrough/finish', wrap(requireDevice), wrap(async (req, res) =>
   await tick();
 
   const active = await getActiveWalkthrough();
+  if (active && !(await unlocked(req, active.id))) {
+    res.status(401).send(unlockPage('/walk/unlock'));
+    return;
+  }
   if (active) {
     const missing = await getMissingCheckpoints(active.id);
     if (missing.length === 0) {
