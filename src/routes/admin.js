@@ -1088,6 +1088,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const brevoFromEmail = (await getSetting('brevo_from_email')) || '';
   const emailTest = await readFlash(req, 'email_test');
   const settingsErr = await readFlash(req, 'settings_err');
+  const emailChannel = (await getSetting('email_channel')) || 'auto';
   const guardPasswordOn = await passwordSet();
   const lastEmail = await lastEmailResult();
   const log = await emailLog();
@@ -1137,6 +1138,15 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
          <div class="card" id="email-settings">
            <h2>Email notifications</h2>
            <p class="muted">A summary email is sent when a walkthrough is <b>completed</b>, and an alert email when checkpoints are <b>missed</b>. Fill in one way of sending below: Mailchimp Transactional, Brevo or SMTP.</p>
+           <label for="email_channel">Send emails via</label>
+           <select id="email_channel" name="email_channel" style="max-width:460px">
+             ${[
+               ['auto', 'Automatic — the first one that is filled in: Mailchimp, then Brevo, then SMTP'],
+               ['smtp', 'SMTP — Gmail / Google Workspace (needs the Railway Pro plan)'],
+               ['brevo', 'Brevo (HTTPS, works on every Railway plan)'],
+               ['mailchimp', 'Mailchimp Transactional'],
+             ].map(([v, label]) => `<option value="${v}"${emailChannel === v ? ' selected' : ''}>${label}</option>`).join('')}
+           </select>
            ${emailTest ? (emailTest === 'ok' || emailTest.startsWith('ok:') ? `<p class="ok">✓ Test email sent${emailTest.length > 3 ? ` to ${esc(emailTest.slice(3))}` : ''} — check the inbox (and the spam folder).</p>` : `<p class="bad">✕ Test failed: ${esc(emailTest)}</p>`) : ''}
            ${settingsErr ? `<p class="bad">✕ ${esc(settingsErr)}</p>` : ''}
            ${lastEmail ? `<p class="muted" style="font-size:.85rem">Last notification email: ${fmtTime(lastEmail.at)} · “${esc(lastEmail.subject)}” — ${lastEmail.ok ? `<span class="ok">✓ accepted for ${esc(lastEmail.sent.join(', '))}</span>` : `<span class="bad">✕ ${esc(lastEmail.error)}</span>`}<br>“Accepted” means the email service took it. If it still doesn't arrive, check the Spam folder and the service's sending logs (Brevo: Transactional → Logs).</p>` : ''}
@@ -1154,8 +1164,9 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <input id="brevo_api_key" name="brevo_api_key" type="password" value="${esc(brevoApiKey)}" placeholder="xkeysib-...">
            <label for="brevo_from_email">From address (a verified sender in Brevo)</label>
            <input id="brevo_from_email" name="brevo_from_email" type="email" value="${esc(brevoFromEmail)}">
-           <h2 style="margin-top:16px">…or plain SMTP (e.g. Gmail — does not work on Railway)</h2>
-           <p class="muted">Leave the Mailchimp key empty and fill these instead. For Gmail: enable 2-step verification, create an <b>App password</b> (Google Account → Security → App passwords), and use it here — not your normal password.</p>
+           <h2 style="margin-top:16px">…or plain SMTP (Gmail / Google Workspace — needs the Railway Pro plan)</h2>
+           <p class="muted">Sending through your own Google account is the best-delivered option: mail from an @bga.ge account goes out from Google itself, so other @bga.ge mailboxes accept it. Host <code>smtp.gmail.com</code>, port <code>465</code>. Enable 2-step verification, create an <b>App password</b> (Google Account → Security → App passwords), and use it here — not your normal password. Railway allows SMTP only on its Pro plan.</p>
+           ${/smtp\.google\.com/i.test(smtpHost) ? `<p><span class="pill bad wrap">${icon('alert')}smtp.google.com is not a mail server — Gmail and Google Workspace use smtp.gmail.com</span></p>` : ''}
            <div class="row">
              <div><label for="smtp_host">SMTP host</label><input id="smtp_host" name="smtp_host" value="${esc(smtpHost)}" placeholder="smtp.gmail.com"></div>
              <div><label for="smtp_port">Port</label><input id="smtp_port" name="smtp_port" type="number" value="${esc(smtpPort)}" placeholder="465"></div>
@@ -1195,7 +1206,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
 const SETTINGS_KEYS = [
   'walk_duration_minutes', 'ntfy_topic', 'webhook_url', 'base_url', 'admin_pin',
   'android_package', 'android_sha256', 'notify_email', 'mailchimp_api_key',
-  'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from', 'brevo_api_key', 'brevo_from_email',
+  'mailchimp_from_email', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass', 'smtp_from', 'brevo_api_key', 'brevo_from_email', 'email_channel',
 ];
 
 // Saves every submitted setting except an email list with a bad address,

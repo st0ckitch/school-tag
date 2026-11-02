@@ -1302,8 +1302,8 @@ test('an unreachable SMTP server on Railway explains the Railway SMTP block', as
     await withSmtp(port, 'x', async () => {
       const result = await sendEmail('Subject', 'Body');
       assert.equal(result.ok, false);
-      assert.match(result.error, /Railway blocks outgoing SMTP .* Free, Trial and Hobby plans/);
-      assert.match(result.error, /Use Brevo/);
+      assert.match(result.error, /Railway allows outgoing SMTP only on the Pro plan .* redeployed once after upgrading/);
+      assert.match(result.error, /use Brevo/);
     });
   } finally {
     delete process.env.RAILWAY_PROJECT_ID;
@@ -1452,4 +1452,40 @@ test('with a guard password, scanning needs it once per round on each phone', as
   }
   assert.equal(await db.getSetting('guard_password_hash'), '');
   assert.equal((await fetch(`${base}/walk`)).status, 200, 'no password: open again');
+});
+
+test('"Send emails via" picks the channel even when another one is also filled in', async () => {
+  const { sendEmail } = require('../src/notify');
+  const smtp = await fakeSmtp('pw');
+  const realFetch = global.fetch;
+  let brevoCalls = 0;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('api.brevo.com')) { brevoCalls++; return new Response(JSON.stringify({ messageId: 'x' }), { status: 201 }); }
+    return realFetch(url, opts);
+  };
+  try {
+    await withSmtp(smtp.port, 'pw', async () => {
+      await db.setSetting('brevo_api_key', 'xkeysib-test');
+      await db.setSetting('brevo_from_email', 'security@example.com');
+      await db.setSetting('email_channel', 'smtp');
+      let result = await sendEmail('Subject', 'Body');
+      assert.equal(result.ok, true);
+      assert.equal(result.channel, 'SMTP');
+      assert.equal(brevoCalls, 0, 'Brevo is skipped when SMTP is chosen');
+
+      await db.setSetting('email_channel', 'auto');
+      result = await sendEmail('Subject', 'Body');
+      assert.equal(result.channel, 'Brevo', 'automatic prefers Brevo over SMTP');
+
+      await db.setSetting('brevo_api_key', '');
+      await db.setSetting('email_channel', 'brevo');
+      result = await sendEmail('Subject', 'Body');
+      assert.equal(result.ok, false);
+      assert.match(result.error, /Brevo is selected as the way to send, but its API key .* is empty/);
+    });
+  } finally {
+    global.fetch = realFetch;
+    smtp.server.close();
+    for (const k of ['brevo_api_key', 'brevo_from_email', 'email_channel']) await db.setSetting(k, '');
+  }
 });

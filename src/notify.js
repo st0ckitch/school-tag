@@ -79,10 +79,15 @@ async function attemptEmail(subject, text, html) {
   const brevoKey = ((await getSetting('brevo_api_key')) || '').trim();
   const smtpUser = ((await getSetting('smtp_user')) || '').trim();
   const smtpPass = ((await getSetting('smtp_pass')) || '').trim();
+  // Which way to send: 'auto' takes the first one that is set up, in the
+  // order below; naming one uses only that one.
+  const channel = ((await getSetting('email_channel')) || 'auto').trim();
+  const want = (name) => channel === 'auto' || channel === name;
 
   // Diagnostic snapshot (no secrets) — shows up in the host's deploy logs.
   console.log('[email] send requested:', {
     subject,
+    channel,
     to: recipients.length ? recipients.join(', ') : '(empty)',
     ...(invalid.length ? { invalid } : {}),
     mailchimp_key: apiKey ? (apiKey.startsWith('md-') ? 'transactional' : 'marketing-type (unusable)') : '(empty)',
@@ -101,11 +106,11 @@ async function attemptEmail(subject, text, html) {
   }
   const toAll = (channel, send) => sendToEach(recipients, invalid, send, channel);
 
-  if (apiKey.startsWith('md-')) {
+  if (want('mailchimp') && apiKey.startsWith('md-')) {
     console.log('[email] channel: Mailchimp Transactional');
     return toAll('Mailchimp Transactional', (to) => sendViaMandrill(to, apiKey, subject, text, html));
   }
-  if (brevoKey) {
+  if (want('brevo') && brevoKey) {
     if (brevoKey.startsWith('xsmtpsib-')) {
       console.error('[email] aborted: Brevo SMTP key supplied instead of API key');
       return {
@@ -118,11 +123,17 @@ async function attemptEmail(subject, text, html) {
     console.log('[email] channel: Brevo (HTTPS)');
     return toAll('Brevo', (to) => sendViaBrevo(to, brevoKey, subject, text, html));
   }
-  if (smtpUser && smtpPass) {
+  if (want('smtp') && smtpUser && smtpPass) {
     console.log('[email] channel: SMTP');
     return toAll('SMTP', (to) => sendViaSmtp(to, smtpUser, smtpPass, subject, text, html));
   }
   console.error('[email] aborted: no usable channel configured');
+  const needs = {
+    mailchimp: 'Mailchimp Transactional is selected as the way to send, but it needs an API key starting with md-',
+    brevo: 'Brevo is selected as the way to send, but its API key (xkeysib-…) is empty',
+    smtp: 'SMTP is selected as the way to send, but the SMTP user or password is empty',
+  };
+  if (needs[channel]) return { ok: false, error: `${needs[channel]} — fill it in, or choose another way under "Send emails via".` };
   if (apiKey) {
     return {
       ok: false,
@@ -342,7 +353,7 @@ function smtpHint(err, host, port) {
   }
   if (/ETIMEDOUT|ECONNECTION|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ESOCKET|EDNS|timeout/i.test(text)) {
     return onRailway
-      ? ` — Railway blocks outgoing SMTP (ports 25, 465, 587, 2525) on its Free, Trial and Hobby plans, so ${host}:${port} can't be reached from here. Use Brevo (it sends over HTTPS), or move the Railway workspace to the Pro plan and redeploy.`
+      ? ` — ${host}:${port} can't be reached from here. Railway allows outgoing SMTP only on the Pro plan and above (not Free, Trial or Hobby), and the service must be redeployed once after upgrading. Otherwise use Brevo, which sends over HTTPS.`
       : ` — ${host}:${port} could not be reached; check the host and port, and that this server may make outgoing SMTP connections.`;
   }
   if (err.code === 'EAUTH') {
