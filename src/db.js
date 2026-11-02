@@ -583,6 +583,26 @@ async function acknowledgeAllAlerts() {
   await client.execute('UPDATE alerts SET acknowledged = 1 WHERE acknowledged = 0');
 }
 
+// --- clearing history ---------------------------------------------------------
+
+async function historyCounts() {
+  await ensureReady();
+  const [w, s, a] = await client.batch(
+    ['SELECT COUNT(*) AS n FROM walkthroughs', 'SELECT COUNT(*) AS n FROM scans', 'SELECT COUNT(*) AS n FROM alerts'],
+    'read'
+  );
+  return { rounds: Number(w.rows[0].n), scans: Number(s.rows[0].n), alerts: Number(a.rows[0].n) };
+}
+
+// Deletes every round, scan and alert — the statistics start from zero.
+// Checkpoints (and which chips they are linked to), devices and settings
+// are untouched. All or nothing.
+async function clearHistory() {
+  const counts = await historyCounts();
+  await client.batch(['DELETE FROM scans', 'DELETE FROM alerts', 'DELETE FROM walkthroughs'], 'write');
+  return counts;
+}
+
 // --- devices (two-phone access limit) --------------------------------------
 
 function sha256(value) {
@@ -722,6 +742,8 @@ module.exports = {
   alertsForWalkthrough,
   acknowledgeAlert,
   acknowledgeAllAlerts,
+  historyCounts,
+  clearHistory,
   listDevices,
   countDevices,
   createEnrollmentCode,

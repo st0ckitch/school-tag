@@ -23,6 +23,8 @@ const {
   unacknowledgedAlerts,
   acknowledgeAlert,
   acknowledgeAllAlerts,
+  historyCounts,
+  clearHistory,
   listDevices,
   createEnrollmentCode,
   deleteDevice,
@@ -120,12 +122,16 @@ async function requireAdmin(req, res, next) {
   );
 }
 
-router.post('/admin/login', wrap(async (req, res) => {
-  const pin = String(req.body.pin || '');
+async function pinMatches(pin) {
+  pin = String(pin || '');
   const expected = String(await getSetting('admin_pin'));
   const a = Buffer.from(pin.padEnd(64));
   const b = Buffer.from(expected.padEnd(64));
-  if (pin.length === expected.length && crypto.timingSafeEqual(a, b)) {
+  return pin.length === expected.length && crypto.timingSafeEqual(a, b);
+}
+
+router.post('/admin/login', wrap(async (req, res) => {
+  if (await pinMatches(req.body.pin)) {
     const token = `admin.${Date.now()}`;
     res.setHeader(
       'Set-Cookie',
@@ -984,20 +990,46 @@ router.post('/admin/devices/settings', wrap(requireAdmin), wrap(async (req, res)
 
 router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
   const walks = await listWalkthroughs(50);
+  const totals = await historyCounts();
   const count = (st) => walks.filter((w) => w.status === st).length;
+  const flashMsg = await readFlash(req, 'msg');
+  const flashErr = await readFlash(req, 'err');
+  const clearCard = totals.rounds
+    ? `<details class="card no-print" id="clear"${flashErr ? ' open' : ''}>
+         <summary style="cursor:pointer;font-weight:700;color:var(--bad)">Clear history and statistics…</summary>
+         <p class="muted" style="margin-top:10px">Deletes <b>all ${totals.rounds} rounds, ${totals.scans} scans and ${totals.alerts} alerts</b>, so the dashboard statistics start from zero — for example after test rounds. Checkpoints and their chips, devices and settings are kept. This cannot be undone.</p>
+         ${flashErr ? `<p><span class="pill bad">${icon('alert')}${esc(flashErr)}</span></p>` : ''}
+         <form method="post" action="/admin/history/clear" data-confirm="Delete all ${totals.rounds} rounds? This cannot be undone." onsubmit="return confirm(this.dataset.confirm)">
+           <label for="clear_pin">Type the admin PIN to confirm</label>
+           <input id="clear_pin" name="pin" type="password" inputmode="numeric" autocomplete="off" required class="input-sm">
+           <button class="btn danger" type="submit">${icon('x')}Delete all history</button>
+         </form>
+       </details>`
+    : '';
   res.send(
     await adminPage(
       'History — School Tag',
       `<div class="page-head">
          <div><h1>Walkthrough history</h1>
-           <div class="sub">Last ${walks.length} rounds · ${count('completed')} completed · ${count('incomplete')} incomplete</div></div>
+           <div class="sub">${totals.rounds} rounds in total · showing the last ${walks.length} · ${count('completed')} completed · ${count('incomplete')} incomplete</div></div>
        </div>
+       ${flashMsg ? `<div class="card" style="padding:14px 18px"><span class="ok" style="font-weight:700">✓ ${esc(flashMsg)}</span></div>` : ''}
        <div class="card">
          ${walks.length ? roundsTable(walks) : '<p class="muted">No walkthroughs yet.</p>'}
-       </div>`,
+       </div>
+       ${clearCard}`,
       { active: '/admin/history' }
     )
   );
+}));
+
+router.post('/admin/history/clear', wrap(requireAdmin), wrap(async (req, res) => {
+  if (!(await pinMatches(req.body.pin))) {
+    return res.redirect((await flashUrl('/admin/history', 'err', 'Wrong PIN — nothing was deleted.')) + '#clear');
+  }
+  const { rounds, scans, alerts } = await clearHistory();
+  console.log(`[admin] history cleared: ${rounds} rounds, ${scans} scans, ${alerts} alerts`);
+  res.redirect(await flashUrl('/admin/history', 'msg', `Deleted ${rounds} rounds, ${scans} scans and ${alerts} alerts. Statistics start from zero.`));
 }));
 
 router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {

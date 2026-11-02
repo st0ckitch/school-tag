@@ -1509,3 +1509,37 @@ test('the outgoing SMTP check tells an open port from a closed one', async () =>
     open.close();
   }
 });
+
+test('clearing history needs the PIN and leaves checkpoints, devices and settings alone', async () => {
+  const cookie = await adminCookie();
+  const post = (body) =>
+    fetch(`${base}/admin/history/clear`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(body).toString(),
+      redirect: 'manual',
+    });
+  const leftover = await db.getActiveWalkthrough();
+  if (leftover) await db.finishWalkthrough(leftover.id, 'cancelled');
+  const cp = await db.addCheckpoint('Keep me', '');
+  const w = await db.startWalkthrough('Tester');
+  await db.recordScan(w.id, cp.id);
+  await db.finishWalkthrough(w.id, 'completed');
+  const before = await db.historyCounts();
+  assert.ok(before.rounds >= 1 && before.scans >= 1);
+  const devicesBefore = (await db.listDevices()).length;
+
+  let res = await post({ pin: '0000' });
+  assert.match(res.headers.get('location'), /err=Wrong\+PIN|err=Wrong%20PIN/);
+  assert.deepEqual(await db.historyCounts(), before, 'wrong PIN deletes nothing');
+
+  res = await post({ pin: '1234' });
+  const page = await (await fetch(`${base}${res.headers.get('location')}`, { headers: { Cookie: cookie } })).text();
+  assert.match(page, new RegExp(`Deleted ${before.rounds} rounds, ${before.scans} scans and ${before.alerts} alerts`));
+  assert.deepEqual(await db.historyCounts(), { rounds: 0, scans: 0, alerts: 0 });
+  assert.ok((await db.listCheckpoints()).some((c) => c.id === cp.id), 'checkpoints stay');
+  assert.equal((await db.listDevices()).length, devicesBefore, 'devices stay');
+  assert.equal(await db.getSetting('admin_pin'), '1234', 'settings stay');
+  assert.doesNotMatch(page, /Clear history and statistics/, 'nothing left to clear');
+  await db.deleteCheckpoint(cp.id);
+});
