@@ -1543,3 +1543,41 @@ test('clearing history needs the PIN and leaves checkpoints, devices and setting
   assert.doesNotMatch(page, /Clear history and statistics/, 'nothing left to clear');
   await db.deleteCheckpoint(cp.id);
 });
+
+test('ADMIN_PIN and GUARD_PASSWORD variables override the Settings values', async () => {
+  const cookie = await adminCookie(); // sessions stay valid: they are signed, not tied to the PIN
+  const form = (path, body, c) =>
+    fetch(`${base}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...(c ? { Cookie: c } : {}) },
+      body: new URLSearchParams(body).toString(),
+      redirect: 'manual',
+    });
+  const leftover = await db.getActiveWalkthrough();
+  if (leftover) await db.finishWalkthrough(leftover.id, 'cancelled');
+  process.env.ADMIN_PIN = 'Strong-Pass-17';
+  process.env.GUARD_PASSWORD = 'gate-9Qx';
+  try {
+    assert.equal((await form('/admin/login', { pin: '1234' })).status, 401, 'the database PIN no longer works');
+    assert.equal((await form('/admin/login', { pin: 'Strong-Pass-17' })).status, 302);
+    const page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
+    assert.match(page, /Set by the ADMIN_PIN variable on Railway/);
+    assert.match(page, /Set by the GUARD_PASSWORD variable on Railway/);
+    assert.doesNotMatch(page, /name="admin_pin"/, 'no PIN field to edit');
+    await form('/admin/settings', { admin_pin: '9999', guard_password: 'ignored' }, cookie);
+    assert.equal(await db.getSetting('admin_pin'), '1234', 'the form cannot change a host-managed PIN');
+    assert.equal(await db.getSetting('guard_password_hash'), '', 'nor the guard password');
+
+    let res = await form('/walkthrough/start', { guard_name: 'Env', password: 'wrong' });
+    assert.equal(res.status, 401);
+    res = await form('/walkthrough/start', { guard_name: 'Env', password: 'gate-9Qx' });
+    assert.equal(res.status, 302);
+    assert.ok(await db.getActiveWalkthrough());
+  } finally {
+    delete process.env.ADMIN_PIN;
+    delete process.env.GUARD_PASSWORD;
+    const still = await db.getActiveWalkthrough();
+    if (still) await db.finishWalkthrough(still.id, 'cancelled');
+  }
+  assert.equal((await form('/admin/login', { pin: '1234' })).status, 302, 'back to the Settings PIN');
+});

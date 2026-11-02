@@ -109,7 +109,7 @@ function loginCard(error) {
     ${error ? `<p><span class="pill bad">${icon('alert')}${esc(error)}</span></p>` : ''}
     <form method="post" action="/admin/login">
       <label for="pin">PIN</label>
-      <input id="pin" name="pin" type="password" inputmode="numeric" autocomplete="current-password" autofocus>
+      <input id="pin" name="pin" type="password" autocomplete="current-password" autofocus>
       <button class="btn full" type="submit">Log in</button>
     </form>
   </div>`;
@@ -122,9 +122,14 @@ async function requireAdmin(req, res, next) {
   );
 }
 
+// The admin PIN comes from the ADMIN_PIN variable on the host when one is
+// set (so it never sits in the database or on the Settings page), otherwise
+// from Settings.
+const envPin = () => (process.env.ADMIN_PIN || '').trim();
+
 async function pinMatches(pin) {
   pin = String(pin || '');
-  const expected = String(await getSetting('admin_pin'));
+  const expected = envPin() || String(await getSetting('admin_pin'));
   const a = Buffer.from(pin.padEnd(64));
   const b = Buffer.from(expected.padEnd(64));
   return pin.length === expected.length && crypto.timingSafeEqual(a, b);
@@ -1001,7 +1006,7 @@ router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
          ${flashErr ? `<p><span class="pill bad">${icon('alert')}${esc(flashErr)}</span></p>` : ''}
          <form method="post" action="/admin/history/clear" data-confirm="Delete all ${totals.rounds} rounds? This cannot be undone." onsubmit="return confirm(this.dataset.confirm)">
            <label for="clear_pin">Type the admin PIN to confirm</label>
-           <input id="clear_pin" name="pin" type="password" inputmode="numeric" autocomplete="off" required class="input-sm">
+           <input id="clear_pin" name="pin" type="password" autocomplete="off" required class="input-sm">
            <button class="btn danger" type="submit">${icon('x')}Delete all history</button>
          </form>
        </details>`
@@ -1129,6 +1134,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
         .join('<br>')}</p>`
     : '';
   const guardPasswordOn = await passwordSet();
+  const guardPasswordFromEnv = Boolean((process.env.GUARD_PASSWORD || '').trim());
   const lastEmail = await lastEmailResult();
   const log = await emailLog();
   const logView = log.length
@@ -1163,9 +1169,13 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <h2>Walkthrough</h2>
            <label for="walk_duration_minutes">Time limit for one walkthrough (minutes). If the guard has not scanned every tag within this time, an alert is sent. <b>Set 0 for no time limit</b> — the walkthrough then stays open until the guard presses Finish.</label>
            <input id="walk_duration_minutes" name="walk_duration_minutes" type="number" min="0" max="720" value="${esc(walkDurationMinutes)}" class="input-sm">
-           <label for="guard_password">Guard password — asked when a guard starts a round (once per round on each phone). ${guardPasswordOn ? '<span class="pill ok">set</span>' : '<span class="pill warn">not set — anyone can scan</span>'}</label>
+           ${
+             guardPasswordFromEnv
+               ? `<label>Guard password — asked when a guard starts a round</label><p><span class="pill info">${icon('shield')}Set by the GUARD_PASSWORD variable on Railway — change it there (Variables tab)</span></p>`
+               : `<label for="guard_password">Guard password — asked when a guard starts a round (once per round on each phone). ${guardPasswordOn ? '<span class="pill ok">set</span>' : '<span class="pill warn">not set — anyone can scan</span>'}</label>
            <input id="guard_password" name="guard_password" type="password" autocomplete="new-password" placeholder="${guardPasswordOn ? 'type a new password to change it' : 'type a password to turn it on'}">
-           ${guardPasswordOn ? '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="guard_password_clear" value="1"> Remove the password (anyone can scan again)</label>' : ''}
+           ${guardPasswordOn ? '<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="guard_password_clear" value="1"> Remove the password (anyone can scan again)</label>' : ''}`
+           }
          </div>
          <div class="card">
            <h2>Alert delivery</h2>
@@ -1222,8 +1232,13 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <h2>System</h2>
            <label for="base_url">Public base URL of this server (used in tag URLs and QR codes)</label>
            <input id="base_url" name="base_url" value="${esc(baseUrlValue)}" placeholder="https://security.myschool.ge">
-           <label for="admin_pin">Admin PIN</label>
+           ${
+             envPin()
+               ? `<label>Admin PIN</label><p><span class="pill info">${icon('shield')}Set by the ADMIN_PIN variable on Railway — change it there (Variables tab)</span></p>`
+               : `<label for="admin_pin">Admin PIN</label>
            <input id="admin_pin" name="admin_pin" value="${esc(adminPin)}">
+           ${adminPin === '1234' ? `<p><span class="pill bad wrap">${icon('alert')}Still the default 1234 — change it, or set an ADMIN_PIN variable on Railway</span></p>` : ''}`
+           }
          </div>
          <div class="card">
            <h2>Android APK</h2>
@@ -1253,10 +1268,13 @@ const SETTINGS_KEYS = [
 // which is kept as it was; returns why, or '' when everything was saved.
 async function saveSettings(req) {
   let error = '';
-  if (req.body.guard_password_clear === '1') await setPassword('');
-  else if (String(req.body.guard_password || '').trim()) await setPassword(String(req.body.guard_password).trim());
+  if (!(process.env.GUARD_PASSWORD || '').trim()) {
+    if (req.body.guard_password_clear === '1') await setPassword('');
+    else if (String(req.body.guard_password || '').trim()) await setPassword(String(req.body.guard_password).trim());
+  }
   for (const key of SETTINGS_KEYS) {
     if (req.body[key] === undefined) continue;
+    if (key === 'admin_pin' && envPin()) continue; // managed on the host
     let value = String(req.body[key]).trim();
     if (key === 'notify_email') {
       const { valid, invalid } = parseRecipients(value);

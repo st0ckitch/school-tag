@@ -12,8 +12,12 @@ const { getSetting, setSetting, getCookieSecret } = require('./db');
 const SETTING = 'guard_password_hash';
 const COOKIE = 'st_round';
 
+// A GUARD_PASSWORD variable on the host wins over the Settings value, so the
+// password can live in Railway instead of the database.
+const envPassword = () => (process.env.GUARD_PASSWORD || '').trim();
+
 async function passwordSet() {
-  return Boolean(await getSetting(SETTING));
+  return Boolean(envPassword() || (await getSetting(SETTING)));
 }
 
 async function setPassword(password) {
@@ -27,6 +31,13 @@ async function setPassword(password) {
 }
 
 async function checkPassword(password) {
+  const env = envPassword();
+  if (env) {
+    const given = String(password || '');
+    const a = Buffer.from(given.padEnd(128));
+    const b = Buffer.from(env.padEnd(128));
+    return given.length === env.length && crypto.timingSafeEqual(a, b);
+  }
   const stored = await getSetting(SETTING);
   if (!stored) return true;
   const [, saltHex, hashHex] = String(stored).split('$');

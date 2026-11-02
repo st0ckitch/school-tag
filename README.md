@@ -251,6 +251,10 @@ to host it:
    and **every deploy starts with an empty database**.
 3. Set `TZ=Asia/Tbilisi`. The built-in scheduler runs here too, so no cron
    is needed.
+3a. Optionally keep the passwords in Railway instead of the database: set
+   `ADMIN_PIN` (the admin login) and/or `GUARD_PASSWORD` (asked when a guard
+   starts a round) as service variables. When set, they override the
+   Settings page, which then says so.
 4. Deploys never delete or replace existing checkpoints. The first start of
    a database with this release shows one of these in the Deploy Logs (later
    starts print none of them):
