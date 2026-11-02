@@ -1489,3 +1489,23 @@ test('"Send emails via" picks the channel even when another one is also filled i
     for (const k of ['brevo_api_key', 'brevo_from_email', 'email_channel']) await db.setSetting(k, '');
   }
 });
+
+test('the outgoing SMTP check tells an open port from a closed one', async () => {
+  const { probe } = require('../src/smtp-check');
+  const net = require('node:net');
+  const open = net.createServer(() => {}).listen(0, '127.0.0.1');
+  await new Promise((r) => open.once('listening', r));
+  const closed = net.createServer().listen(0, '127.0.0.1');
+  await new Promise((r) => closed.once('listening', r));
+  const closedPort = closed.address().port;
+  closed.close();
+  try {
+    const ok = await probe('127.0.0.1', open.address().port);
+    assert.equal(ok.ok, true);
+    const bad = await probe('127.0.0.1', closedPort);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.error, 'ECONNREFUSED');
+  } finally {
+    open.close();
+  }
+});

@@ -9,6 +9,7 @@ const { getVapidKeys } = require('./src/notify');
 const { currentDevice } = require('./src/device');
 const { getSetting, addPushSubscription } = require('./src/db');
 const { ensureSchoolCheckpoints } = require('./src/school-checkpoints');
+const { checkSmtpEgress } = require('./src/smtp-check');
 
 const app = express();
 app.disable('x-powered-by');
@@ -123,6 +124,7 @@ if (require.main === module) {
       console.log(`Guard page:  /walk    Admin: /admin (default PIN 1234 — change it in Settings!)`);
     });
     startScheduler();
+    checkSmtpEgress().catch((err) => console.error('[smtp] outgoing check failed:', err.message));
   })();
 }
 

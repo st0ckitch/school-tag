@@ -37,6 +37,7 @@ const { esc, page, icon, ring, place, ka } = require('../html');
 const { areaChart, sparkline } = require('../charts');
 const { testEmail } = require('../email-template');
 const { passwordSet, setPassword } = require('../guard-lock');
+const { lastSmtpEgress } = require('../smtp-check');
 
 const router = express.Router();
 
@@ -1089,6 +1090,12 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   const emailTest = await readFlash(req, 'email_test');
   const settingsErr = await readFlash(req, 'settings_err');
   const emailChannel = (await getSetting('email_channel')) || 'auto';
+  const egress = await lastSmtpEgress();
+  const egressView = egress && Array.isArray(egress.results)
+    ? `<p class="muted" style="font-size:.85rem">Outgoing SMTP from this server, checked when it last started (${fmtTime(egress.at)}):<br>${egress.results
+        .map((r) => (r.ok ? `<span class="ok">✓ ${esc(r.host)}:${r.port} reachable</span>` : `<span class="bad">✕ ${esc(r.host)}:${r.port} unreachable — ${esc(r.error)}</span>`))
+        .join('<br>')}</p>`
+    : '';
   const guardPasswordOn = await passwordSet();
   const lastEmail = await lastEmailResult();
   const log = await emailLog();
@@ -1166,6 +1173,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
            <input id="brevo_from_email" name="brevo_from_email" type="email" value="${esc(brevoFromEmail)}">
            <h2 style="margin-top:16px">…or plain SMTP (Gmail / Google Workspace — needs the Railway Pro plan)</h2>
            <p class="muted">Sending through your own Google account is the best-delivered option: mail from an @bga.ge account goes out from Google itself, so other @bga.ge mailboxes accept it. Host <code>smtp.gmail.com</code>, port <code>465</code>. Enable 2-step verification, create an <b>App password</b> (Google Account → Security → App passwords), and use it here — not your normal password. Railway allows SMTP only on its Pro plan.</p>
+           ${egressView}
            ${/smtp\.google\.com/i.test(smtpHost) ? `<p><span class="pill bad wrap">${icon('alert')}smtp.google.com is not a mail server — Gmail and Google Workspace use smtp.gmail.com</span></p>` : ''}
            <div class="row">
              <div><label for="smtp_host">SMTP host</label><input id="smtp_host" name="smtp_host" value="${esc(smtpHost)}" placeholder="smtp.gmail.com"></div>
