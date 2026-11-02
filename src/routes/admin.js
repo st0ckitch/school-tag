@@ -46,7 +46,7 @@ const router = express.Router();
 // Express 4 does not catch async handler rejections — route them to next().
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// Admin pages link the separate "School Tag Admin" manifest/icon, so the
+// Admin pages link the separate "BGA Security Manager Admin" manifest/icon, so the
 // dashboard installs as its own app on the administrator's phone. A page
 // that names its `active` section gets the app shell (sidebar on desktop,
 // tab bar on phones, top bar with the alert bell); the rest are centred.
@@ -451,7 +451,7 @@ router.get('/admin', wrap(requireAdmin), wrap(async (req, res) => {
 
   res.send(
     await adminPage(
-      'Dashboard — School Tag',
+      'Dashboard — BGA Security Manager',
       `<div class="page-head">
          <div><h1>School security dashboard</h1>
            <div class="sub">${new Date(now).toLocaleDateString('en-GB', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' })} · ${checkpoints.length} active checkpoints · ${active ? 'round in progress' : 'no round running'} · updates automatically</div></div>
@@ -531,7 +531,7 @@ router.get('/admin/checkpoints', wrap(requireAdmin), wrap(async (req, res) => {
     .join('');
   res.send(
     await adminPage(
-      'Checkpoints — School Tag',
+      'Checkpoints — BGA Security Manager',
       `<div class="page-head">
          <div><h1>Checkpoints</h1>
            <div class="sub">${activeReal.length - unlinkedCount} of ${activeReal.length} linked to a chip${
@@ -894,7 +894,7 @@ router.get('/admin/tags', wrap(requireAdmin), wrap(async (req, res) => {
   );
   res.send(
     await adminPage(
-      'Tag sheet — School Tag',
+      'Tag sheet — BGA Security Manager',
       `<div class="page-head no-print">
          <div><h1>Tag sheet</h1><div class="sub">${checkpoints.length} active checkpoints · one URL and QR code per chip</div></div>
          <button class="btn" onclick="window.print()">${icon('tag')}Print</button>
@@ -929,7 +929,7 @@ async function devicesPage(req, enrollUrl) {
     : '';
 
   return await adminPage(
-    'Devices — School Tag',
+    'Devices — BGA Security Manager',
     `<div class="page-head">
        <div><h1>Allowed devices</h1>
          <div class="sub">${devices.length} of ${esc(max)} enrolled · enforcement ${enforcing ? `<span class="pill ok">${icon('check')}On</span>` : `<span class="pill warn">${icon('alert')}Off</span>`}</div></div>
@@ -1013,7 +1013,7 @@ router.get('/admin/history', wrap(requireAdmin), wrap(async (req, res) => {
     : '';
   res.send(
     await adminPage(
-      'History — School Tag',
+      'History — BGA Security Manager',
       `<div class="page-head">
          <div><h1>Walkthrough history</h1>
            <div class="sub">${totals.rounds} rounds in total · showing the last ${walks.length} · ${count('completed')} completed · ${count('incomplete')} incomplete</div></div>
@@ -1082,7 +1082,7 @@ router.get('/admin/history/:id', wrap(requireAdmin), wrap(async (req, res) => {
 
   res.send(
     await adminPage(
-      'Walkthrough — School Tag',
+      'Walkthrough — BGA Security Manager',
       `<div class="page-head">
          <div><h1>Walkthrough ${fmtTime(w.started_at)}</h1>
            <div class="sub" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">Guard: ${ka(w.guard_name || '—')} · ${STATUS_PILL[w.status] || esc(w.status)} · Finished: ${fmtTime(w.completed_at)}${took ? ` · ${took}` : ''}</div></div>
@@ -1162,7 +1162,7 @@ router.get('/admin/settings', wrap(requireAdmin), wrap(async (req, res) => {
   );
   res.send(
     await adminPage(
-      'Settings — School Tag',
+      'Settings — BGA Security Manager',
       `<h1>Settings</h1>
        <form method="post" action="/admin/settings">
          <div class="card">

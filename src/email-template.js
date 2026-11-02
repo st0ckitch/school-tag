@@ -46,7 +46,7 @@ function frame({ preheader, title, badge, body, button }) {
         <table role="presentation" cellpadding="0" cellspacing="0"><tr>
           <td style="width:40px;height:40px;border-radius:12px;background:${C.accent};background-image:linear-gradient(140deg,#a196ff,#6a5af9);color:#ffffff;font-size:20px;text-align:center;vertical-align:middle;">🛡</td>
           <td style="padding-left:12px;font-family:${FONT};">
-            <div style="font-size:16px;font-weight:800;color:${C.text};">School Tag</div>
+            <div style="font-size:16px;font-weight:800;color:${C.text};">BGA Security Manager</div>
             <div style="font-size:12px;color:${C.muted};">სკოლის უსაფრთხოების სისტემა</div>
           </td>
         </tr></table>
@@ -60,7 +60,7 @@ function frame({ preheader, title, badge, body, button }) {
         </td></tr></table>` : ''}
       </td></tr>
       <tr><td style="padding:16px 8px;text-align:center;font-size:12px;color:${C.muted};font-family:${FONT};">
-        ეს შეტყობინება ავტომატურად გაიგზავნა School Tag-ის მიერ.
+        ეს შეტყობინება ავტომატურად გაიგზავნა BGA Security Manager-ის მიერ.
       </td></tr>
     </table>
   </td></tr>
@@ -165,8 +165,8 @@ function roundEmail({ walkthrough, scans, missing, endedAt, reason, detailsUrl }
 
 // The "Save & send test email" message from Settings.
 function testEmail() {
-  const subject = 'School Tag: სატესტო შეტყობინება';
-  const text = 'ეს არის სატესტო შეტყობინება School Tag-ის პარამეტრებიდან. თუ ამას კითხულობთ, ელფოსტის შეტყობინებები მუშაობს.';
+  const subject = 'BGA Security Manager: სატესტო შეტყობინება';
+  const text = 'ეს არის სატესტო შეტყობინება BGA Security Manager-ის პარამეტრებიდან. თუ ამას კითხულობთ, ელფოსტის შეტყობინებები მუშაობს.';
   const html = frame({
     preheader: 'ელფოსტის შეტყობინებები მუშაობს.',
     title: 'სატესტო შეტყობინება',

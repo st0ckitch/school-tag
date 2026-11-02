@@ -39,7 +39,7 @@ jobs:
           else
             keytool -genkeypair -keystore "$RUNNER_TEMP/keystore.jks" -alias schooltag \
               -storepass schooltag123 -keypass schooltag123 -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname "CN=School Tag"
+              -validity 10000 -dname "CN=BGA Security Manager"
             echo "KS_PASS=schooltag123" >> "$GITHUB_ENV"
             echo "KS_GENERATED=yes" >> "$GITHUB_ENV"
           fi

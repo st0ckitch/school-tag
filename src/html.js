@@ -491,7 +491,7 @@ const CSS = `
 const LOGO = `<span class="tile violet sm" aria-hidden="true">${icon('shield')}</span>`;
 
 function brand(sub) {
-  return `${LOGO}<span><span class="brand-name">School Tag</span><br><span class="brand-sub">${esc(sub)}</span></span>`;
+  return `${LOGO}<span><span class="brand-name">BGA Security Manager</span><br><span class="brand-sub">${esc(sub)}</span></span>`;
 }
 
 const ADMIN_NAV = [
@@ -531,7 +531,7 @@ function adminShell(body, { active, alerts = 0, query = '' }) {
     </aside>
     <div class="main">
       <header class="topbar no-print">
-        <a class="brand m-only" href="/admin">${LOGO}<span class="brand-name">School Tag</span></a>
+        <a class="brand m-only" href="/admin">${LOGO}<span class="brand-name">BGA Security</span></a>
         <form class="search" method="get" action="/admin/checkpoints" role="search">
           ${icon('search')}
           <input type="search" name="q" value="${esc(query)}" placeholder="Search checkpoints…" aria-label="Search checkpoints" autocomplete="off">
@@ -608,7 +608,7 @@ const GUARD_SCRIPT = `
           if (code && location.pathname.replace(/\\/link$/, '') === '/t/' + code) { say('ეს ტეგი უკვე გახსნილია · This chip is already open.'); return; }
           if (code) { location.href = '/t/' + code; return; }
         }
-        say('ეს ტეგი სისტემის არ არის · Not a School Tag chip.');
+        say('ეს ტეგი სისტემის არ არის · Not a BGA Security chip.');
       };
       reader.onreadingerror = function () { say('ვერ წავიკითხე, სცადეთ ისევ · Could not read the chip, try again.'); };
     } catch (err) {
@@ -694,7 +694,7 @@ function page(title, body, opts = {}) {
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0d18">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="${opts.admin ? 'ST Admin' : 'School Tag'}">
+  <meta name="apple-mobile-web-app-title" content="${opts.admin ? 'BGA Admin' : 'BGA Security'}">
   <link rel="manifest" href="${opts.admin ? '/manifest-admin.webmanifest' : '/manifest.webmanifest'}">
   <link rel="apple-touch-icon" href="${opts.admin ? '/icons/admin-180.png' : '/icons/icon-180.png'}">
   <link rel="icon" type="image/png" sizes="192x192" href="${opts.admin ? '/icons/admin-192.png' : '/icons/icon-192.png'}">

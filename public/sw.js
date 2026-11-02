@@ -54,7 +54,7 @@ self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data.json(); } catch (e) { data = { body: event.data && event.data.text() }; }
   event.waitUntil(
-    self.registration.showNotification(data.title || 'School Tag', {
+    self.registration.showNotification(data.title || 'BGA Security Manager', {
       body: data.body || '',
       icon: '/icons/icon-192.png',
       badge: '/icons/icon-192.png',

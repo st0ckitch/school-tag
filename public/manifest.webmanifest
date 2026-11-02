@@ -1,6 +1,6 @@
 {
-  "name": "School Tag Security",
-  "short_name": "School Tag",
+  "name": "BGA Security Manager",
+  "short_name": "BGA Security",
   "description": "NFC guard-tour walkthroughs for school security",
   "start_url": "/walk",
   "scope": "/",

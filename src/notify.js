@@ -218,7 +218,7 @@ async function sendViaMandrill(to, apiKey, subject, text, html) {
         key: apiKey,
         message: {
           from_email: from,
-          from_name: 'School Tag',
+          from_name: 'BGA Security Manager',
           to: [{ email: to, type: 'to' }],
           subject,
           text,
@@ -255,7 +255,7 @@ async function sendViaBrevo(to, apiKey, subject, text, html) {
       method: 'POST',
       headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({
-        sender: { name: 'School Tag', email: from },
+        sender: { name: 'BGA Security Manager', email: from },
         to: [{ email: to }],
         subject,
         textContent: text,
@@ -324,7 +324,7 @@ async function sendViaSmtp(to, user, pass, subject, text, html) {
       timer.unref();
     });
     try {
-      await Promise.race([transport.sendMail({ from: `"School Tag" <${from}>`, to, subject, text, ...(html ? { html } : {}) }), deadline]);
+      await Promise.race([transport.sendMail({ from: `"BGA Security Manager" <${from}>`, to, subject, text, ...(html ? { html } : {}) }), deadline]);
     } finally {
       clearTimeout(timer);
     }

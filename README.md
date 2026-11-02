@@ -1,4 +1,4 @@
-# School Tag — NFC guard-tour system
+# BGA Security Manager — NFC guard-tour system
 
 A small self-hosted system for school security walkthroughs:
 

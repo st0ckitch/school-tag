@@ -1,7 +1,7 @@
 {
   "id": "/admin",
-  "name": "School Tag Admin",
-  "short_name": "ST Admin",
+  "name": "BGA Security Manager — Admin",
+  "short_name": "BGA Admin",
   "description": "Admin dashboard for the school security guard-tour system",
   "start_url": "/admin",
   "scope": "/",
